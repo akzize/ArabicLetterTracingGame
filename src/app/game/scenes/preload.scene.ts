@@ -6,10 +6,10 @@ export class PreloadScene extends Phaser.Scene {
     preload() {
         // load letters
         // this.load.image('alif', 'assets/letters/alif.png');
-        this.load.image('baa', 'assets/letters/1.png');
+        this.load.image('baa', 'assets/letters/baaa.png');
     }
 
     create() {
-        this.scene.start('MainScene');
+        this.scene.start('TracingGameScene');
     }
 }
