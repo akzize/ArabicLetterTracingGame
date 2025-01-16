@@ -1,6 +1,7 @@
 import { PreloadScene } from './../game/scenes/preload.scene';
 import { Injectable } from '@angular/core';
 import { MainScene } from '../game/scenes/main.scene';
+import { TracingGameScene } from '../../assets/arrows/game/scenes/tracing-game.scene';
 
 @Injectable({
   providedIn: 'root',
@@ -10,10 +11,10 @@ export class GameConfigService {
 
   getConfig(container: HTMLElement): Phaser.Types.Core.GameConfig {
     return {
-      type: Phaser.AUTO,
+      type: Phaser.CANVAS,
       width: 800,
       height: 600,
-      scene: [PreloadScene, MainScene],
+      scene: [PreloadScene, TracingGameScene, MainScene],
       scale: {
         mode: Phaser.Scale.FIT,
         autoCenter: Phaser.Scale.CENTER_BOTH,
@@ -26,6 +27,7 @@ export class GameConfigService {
         },
       },
       parent: container,
+      antialias: false,
     };
   }
 }
