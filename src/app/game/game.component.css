@@ -1,0 +1,13 @@
+#input-container {
+    position: absolute;
+    top: 16px;
+    left: 596px;
+    z-index: 10;
+
+    label {
+        color: black;
+    }
+    input, button {
+        padding: 5px 10px;
+    }
+}
