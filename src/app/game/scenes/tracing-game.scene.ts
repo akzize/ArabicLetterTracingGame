@@ -1,3 +1,5 @@
+import { OnInit } from "@angular/core";
+
 interface Letter {
   paths: { x: number; y: number }[][];
   dims: {
@@ -9,9 +11,17 @@ interface Letter {
   };
 }
 
+type LetterSegment = {
+  start: Phaser.Geom.Point;
+  end: Phaser.Geom.Point;
+  bounds: Phaser.Geom.Rectangle;
+  angle: number; // Angle of the segment
+  completed: boolean; // Indicates if the segment is completed
+};
+
 export class TracingGameScene extends Phaser.Scene {
   private letterData!: any; // Holds the loaded letter data
-  private letterGraphics!: Phaser.GameObjects.Graphics;
+  private letterGraphics: Phaser.GameObjects.Graphics[] = [];
 
   private childDrawingGraphics!: Phaser.GameObjects.Graphics; // Graphics for the child's drawing
   private isDrawing: boolean = false; // To track if the child is currently drawing
@@ -28,7 +38,47 @@ export class TracingGameScene extends Phaser.Scene {
   private offsetY: number = 0;
 
   private currentChunkIndex: number = 0; // Stores the index of the current chunk being processed
+  private currentChunk: { x: number; y: number }[] = [];
 
+  private segmentVisuals: Phaser.GameObjects.Graphics[][] = [];
+  private hitsPerSegment: number[] = [];
+  private minHitsPerSegment = 5; // Points needed to "complete" a segment
+  // private segments: { start: Phaser.Geom.Point; end: Phaser.Geom.Point; bounds: Phaser.Geom.Rectangle }[] = [];
+  private segments: LetterSegment[][] = [];
+  private drawnSegments!: LetterSegment[];
+
+  private currentSegmentIndex: number = 0;
+  private segmentStates: ('pending' | 'active' | 'completed' | 'error')[] = [];
+  private lastValidPosition: Phaser.Geom.Point | null = null;
+
+  // ANIMATION
+  private animationInterval: number | null = null;
+  private isAnimating: boolean = false;
+
+  // COLORS
+  private currentSegmentColor: number = 0xffff00; // Yellow for current segment
+  private completedSegmentColor: number = 0x019295; // Green for completed segments
+  private drawingChunkColor: number = 0x27AFEF; // Blue for the current chunk
+  private currentChunkColor: number = 0x000; // Blue for the current chunk
+  // private currentChunkColor: number = 0xF48E07; // Blue for the current chunk
+  private defaultLetterColor: number = 0xd3d3d3; // Blue for the current chunk
+  private arrowColor: number = 0xffff00; // Black for the arrow
+
+  private firstDotColor: number = 0xDD5746; // Green for the first dot
+  private dotsColor: number = 0xffffff; // Red for the dots
+
+  // CHUNKS
+  private chunkElements: (Phaser.GameObjects.Graphics | Phaser.GameObjects.Image)[] = [];
+
+  private completedChunks: Set<number> = new Set(); // Stores indices of completed chunks
+  private segmentDrawSuccessRate: number = 95; // Minimum completion rate to move to the next chunk
+
+
+  // OBJECTS DEPTHS
+  private handDepth = 1;
+  private readonly chunkFinishedDepth = 1;
+  private readonly chunkUnfinishedDepth = 1;
+  private readonly letterDepth = 1;
   constructor() {
     super({ key: 'TracingGameScene' });
   }
@@ -37,7 +87,7 @@ export class TracingGameScene extends Phaser.Scene {
   preload() {
     // Load the JSON file containing the letter paths
     this.load.json('letters', 'assets/letters.json');
-    this.load.image('arrow', 'assets/arrows/up-arrow.png');
+    this.load.image('arrow', 'assets/arrows/arrow-sm-up.svg');
     this.load.image('hand', 'assets/hands/hand.png'); // Replace with your hand image path
   }
 
@@ -46,16 +96,16 @@ export class TracingGameScene extends Phaser.Scene {
     this.letterData = this.cache.json.get('letters').siin;
 
     // Initialize graphics object for drawing
-    this.letterGraphics = this.add.graphics();
+    this.letterGraphics[this.currentChunkIndex] = this.add.graphics();
     this.childDrawingGraphics = this.add.graphics();
 
     // Draw the letter path
-    console.log(this.letterData.paths);
+    // console.log(this.letterData.chunks);
 
     // Setup input and button functionality
     this.setupInputAndButton();
 
-    // this.drawLetter(this.letterData.paths);
+    // this.drawLetter(this.letterData.chunks);
 
     // Draw the letter path with boundaries
     this.drawLetterWithBoundaries(this.letterData.paths, this.letterData.dims);
@@ -74,7 +124,6 @@ export class TracingGameScene extends Phaser.Scene {
    * @param paths - A two-dimensional array of points, where each inner array
    *                represents a path composed of points with x and y coordinates.
    */
-
   private setupInputAndButton(): void {
     // Access the input field and button
     const inputElement = document.getElementById(
@@ -118,7 +167,7 @@ export class TracingGameScene extends Phaser.Scene {
       this.letterData = letterData;
 
       // Clear previous graphics
-      this.letterGraphics.clear();
+      this.letterGraphics[this.currentChunkIndex].clear();
       this.childDrawingGraphics.clear();
 
       // Draw the new letter
@@ -130,635 +179,127 @@ export class TracingGameScene extends Phaser.Scene {
     }
   }
 
-  private drawLetter(paths: { x: number; y: number }[][]): void {
-    this.letterGraphics.lineStyle(10, 0x0000ff, 1); // Blue line, 5px thick
-    // Loop through each path in the paths array
-    paths.forEach((path) => {
-      this.letterGraphics.beginPath();
-      path.forEach((point, index) => {
-        if (index === 0) {
-          // Move to the starting point
-          this.letterGraphics.moveTo(point.x * this.scaleUp, point.y * this.scaleUp); // Scale up for visibility
-        } else {
-          // Draw a line to the next point
-          this.letterGraphics.lineTo(point.x * this.scaleUp, point.y * this.scaleUp);
-        }
+  /**
+ * Draws faint lines for the letter's outer and inner boundaries.
+ * @param paths - The letter's path data.
+ * @param offsetX - The X offset for centering.
+ * @param offsetY - The Y offset for centering.
+ */
+  private drawFaintLetterPaths(paths: { x: number; y: number }[][][], offsetX: number, offsetY: number): void {
+    console.log(paths);
+    
+    paths.forEach((pathGroup) => {
+      pathGroup.forEach((path) => {
+        // Draw faint line for the actual letter path
+        this.letterGraphics[this.currentChunkIndex].lineStyle(20, this.defaultLetterColor, 0.5); // Faint gray line
+        this.letterGraphics[this.currentChunkIndex].beginPath();
+        path.forEach((point, index) => {
+          const x = point.x * this.scaleUp + offsetX;
+          const y = point.y * this.scaleUp + offsetY;
+          index === 0 ? this.letterGraphics[this.currentChunkIndex].moveTo(x, y) : this.letterGraphics[this.currentChunkIndex].lineTo(x, y);
+        });
+        this.letterGraphics[this.currentChunkIndex].strokePath();
+
       });
-      this.letterGraphics.strokePath(); // Render the path
     });
-  }
-
-  private calculateOffsetPath(
-    path: { x: number; y: number }[],
-    offset: number
-  ): { x: number; y: number }[] {
-    const offsetPath: { x: number; y: number }[] = [];
-
-    for (let i = 0; i < path.length; i++) {
-      const current = path[i];
-      const previous = path[i - 1] || path[i];
-      const next = path[i + 1] || path[i];
-
-      // Calculate direction vectors
-      const dx = next.x - previous.x;
-      const dy = next.y - previous.y;
-
-      // Normalize the vector
-      const length = Math.sqrt(dx * dx + dy * dy);
-      const nx = -dy / length; // Perpendicular vector x
-      const ny = dx / length; // Perpendicular vector y
-
-      // Offset the point
-      offsetPath.push({
-        x: current.x + nx * offset,
-        y: current.y + ny * offset,
-      });
-    }
-
-    return offsetPath;
   }
 
   /**
-   * Draws a dashed line along the provided path with an arrowhead at the end.
-   * The path is scaled up for visibility, and the line style is set to a dashed pattern.
-   *
-   * @param path - An array of points representing the path, each with x and y coordinates.
-   * @param scaleUp - A scaling factor to increase the size of the drawn path for visibility.
-   */
-  private drawDashedLineWithArrow(
-    path: { x: number; y: number }[],
-    scaleUp: number
-  ): void {
-    const dashLength = 10; // Length of each dash
-    const gapLength = 5; // Length of each gap between dashes
-    const arrowSize = 15; // Size of the arrowhead
-
-    // Draw dashed line
-    this.letterGraphics.lineStyle(2, 0xff0000, 1); // Yellow dashed line
-    this.letterGraphics.beginPath();
-
-    for (let i = 0; i < path.length - 1; i++) {
-      const start = path[i];
-      const end = path[i + 1];
-
-      const distance = Phaser.Math.Distance.Between(
-        start.x,
-        start.y,
-        end.x,
-        end.y
-      );
-      const direction = new Phaser.Math.Vector2(
-        end.x - start.x,
-        end.y - start.y
-      ).normalize();
-
-      let currentDistance = 0;
-
-      while (currentDistance < distance) {
-        const from = {
-          x: start.x + direction.x * currentDistance,
-          y: start.y + direction.y * currentDistance,
-        };
-        const to = {
-          x:
-            start.x +
-            direction.x * Math.min(currentDistance + dashLength, distance),
-          y:
-            start.y +
-            direction.y * Math.min(currentDistance + dashLength, distance),
-        };
-
-        this.letterGraphics.moveTo(from.x * scaleUp, from.y * scaleUp);
-        this.letterGraphics.lineTo(to.x * scaleUp, to.y * scaleUp);
-        currentDistance += dashLength + gapLength;
-      }
-    }
-
-    this.letterGraphics.strokePath();
-
-    // Add arrow at the end
-    const lastPoint = path[path.length - 3];
-    const arrowEnd = path[path.length - 2];
-
-    const angle = Phaser.Math.Angle.BetweenPoints(lastPoint, arrowEnd);
-
-    this.letterGraphics.fillStyle(0xff0000, 1); // Yellow arrow
-    this.letterGraphics.beginPath();
-    this.letterGraphics.moveTo(arrowEnd.x * scaleUp, arrowEnd.y * scaleUp);
-    this.letterGraphics.lineTo(
-      arrowEnd.x * scaleUp - Math.cos(angle - Math.PI / 6) * arrowSize,
-      arrowEnd.y * scaleUp - Math.sin(angle - Math.PI / 6) * arrowSize
-    );
-    this.letterGraphics.lineTo(
-      arrowEnd.x * scaleUp - Math.cos(angle + Math.PI / 6) * arrowSize,
-      arrowEnd.y * scaleUp - Math.sin(angle + Math.PI / 6) * arrowSize
-    );
-    this.letterGraphics.closePath();
-    this.letterGraphics.fillPath();
-  }
-
-  private drawDottedLineWithArrowAnimated(
-    path: { x: number; y: number }[],
-    scaleUp: number,
-    duration: number
-  ): void {
-    const dotRadius = 3; // Radius of each dot
-    const dotSpacing = 10; // Spacing between each dot
-    const arrowSize = 15; // Size of the arrowhead
-    const totalDots = Math.floor(duration / 50); // Adjust based on animation speed
-
-    let dotIndex = 0; // Tracks how many dots have been drawn
-    const dots: { x: number; y: number }[] = [];
-
-    // Precompute all dot positions
-    path.forEach((point, index) => {
-      if (index < path.length - 1) {
-        const start = path[index];
-        const end = path[index + 1];
-
-        const distance = Phaser.Math.Distance.Between(
-          start.x,
-          start.y,
-          end.x,
-          end.y
-        );
-        const direction = new Phaser.Math.Vector2(
-          end.x - start.x,
-          end.y - start.y
-        ).normalize();
-
-        let currentDistance = 0;
-        while (currentDistance < distance) {
-          dots.push({
-            x: start.x + direction.x * currentDistance,
-            y: start.y + direction.y * currentDistance,
-          });
-          currentDistance += dotSpacing;
-        }
-      }
-    });
-
-    // Animate dots
-    const interval = setInterval(() => {
-      if (dotIndex >= dots.length) {
-        clearInterval(interval); // Stop animation when all dots are drawn
-
-        // Add arrow at the end
-        const lastPoint = path[path.length - 2];
-        const arrowEnd = path[path.length - 1];
-
-        const angle = Phaser.Math.Angle.BetweenPoints(lastPoint, arrowEnd);
-
-        this.letterGraphics.fillStyle(0xff0000, 1); // Red arrow
-        this.letterGraphics.beginPath();
-        this.letterGraphics.moveTo(arrowEnd.x * scaleUp, arrowEnd.y * scaleUp);
-        this.letterGraphics.lineTo(
-          arrowEnd.x * scaleUp - Math.cos(angle - Math.PI / 6) * arrowSize,
-          arrowEnd.y * scaleUp - Math.sin(angle - Math.PI / 6) * arrowSize
-        );
-        this.letterGraphics.lineTo(
-          arrowEnd.x * scaleUp - Math.cos(angle + Math.PI / 6) * arrowSize,
-          arrowEnd.y * scaleUp - Math.sin(angle + Math.PI / 6) * arrowSize
-        );
-        this.letterGraphics.closePath();
-        this.letterGraphics.fillPath();
-
-        return;
-      }
-
-      // Draw the current dot
-      const dot = dots[dotIndex];
-      this.letterGraphics.fillStyle(0xff0000, 1); // Red color for dots
-      this.letterGraphics.fillCircle(
-        dot.x * scaleUp,
-        dot.y * scaleUp,
-        dotRadius
-      );
-
-      dotIndex++;
-    }, duration / totalDots);
-  }
-
-  private validateChildDrawing(
-    chunk: { x: number; y: number }[][],
+ * Animates the current chunk and waits for the child to draw.
+ * @param currentChunk - The current chunk to animate.
+ * @param scaleUp - The scaling factor.
+ * @param offsetX - The X offset for centering.
+ * @param offsetY - The Y offset for centering.
+ */
+  private animateAndWaitForChunk(
+    currentChunk: { x: number; y: number }[],
     scaleUp: number,
     offsetX: number,
     offsetY: number
-  ): Promise<boolean> {
-    return new Promise((resolve) => {
-      const tolerance = 20; // Define a tolerance for matching drawn points to the chunk
-      let isValid = true;
-
-      for (const path of chunk) {
-        for (const point of path) {
-          const drawnPoint = this.drawnPoints.find(
-            (drawn) =>
-              Phaser.Math.Distance.Between(
-                point.x * scaleUp + offsetX,
-                point.y * scaleUp + offsetY,
-                drawn.x,
-                drawn.y
-              ) < tolerance
-          );
-
-          if (!drawnPoint) {
-            isValid = false;
-            break;
-          }
-        }
-
-        if (!isValid) break;
-      }
-
-      // Simulate a delay for validation (e.g., after user finishes drawing)
-      setTimeout(() => resolve(isValid), 500);
+  ): Promise<void> {
+    return this.animateChunk(currentChunk, scaleUp, offsetX, offsetY).then(() => {
+      return this.waitForChildToDraw(currentChunk, scaleUp, offsetX, offsetY);
     });
   }
+
+  /**
+ * Validates the child's drawing and moves to the next chunk if valid.
+ * @param paths - The letter's path data.
+ * @param dims - The dimensions of the letter.
+ * @param segments - The segments of the current chunk.
+ */
+
 
   // MARK: Draw letter boundaries
-  private drawLetterWithBoundaries1(paths: { x: number; y: number }[][]): void {
-    const offset = 1; // Offset distance for boundaries
-    const scaleUp = 10;
-    const boundingBox = this.calculateBoundingBox(paths);
-
-    // Center the letter in the scene
-    const sceneCenterX = this.cameras.main.width / 2;
-    const sceneCenterY = this.cameras.main.height / 2;
-    const offsetX =
-      sceneCenterX -
-      (boundingBox.width * scaleUp) / 2 -
-      boundingBox.x * scaleUp;
-    const offsetY =
-      sceneCenterY -
-      (boundingBox.height * scaleUp) / 2 -
-      boundingBox.y * scaleUp;
-
-    paths.forEach((path) => {
-      // Calculate inner and outer paths
-      const outerPath = this.calculateOffsetPath(path, offset);
-      const innerPath = this.calculateOffsetPath(path, -offset);
-      const outlineThickness = 3;
-
-      // Draw the outer boundary
-      this.letterGraphics.lineStyle(outlineThickness, 0xff0000, 1); // Red line, 3px thick
-      this.letterGraphics.beginPath();
-      outerPath.forEach((point, index) => {
-        if (index === 0) {
-          this.letterGraphics.moveTo(
-            point.x * scaleUp + offsetX,
-            point.y * scaleUp + offsetY
-          );
-        } else {
-          this.letterGraphics.lineTo(
-            point.x * scaleUp + offsetX,
-            point.y * scaleUp + offsetY
-          );
-        }
-      });
-      this.letterGraphics.strokePath();
-
-      // Draw the inner boundary
-      this.letterGraphics.lineStyle(outlineThickness, 0x0000ff, 1); // Blue line, 3px thick
-      this.letterGraphics.beginPath();
-      innerPath.forEach((point, index) => {
-        if (index === 0) {
-          this.letterGraphics.moveTo(
-            point.x * scaleUp + offsetX,
-            point.y * scaleUp + offsetY
-          );
-        } else {
-          this.letterGraphics.lineTo(
-            point.x * scaleUp + offsetX,
-            point.y * scaleUp + offsetY
-          );
-        }
-      });
-      this.letterGraphics.strokePath();
-
-      // Draw the actual letter path
-      this.drawDottedLineWithHand(path, scaleUp, 2000, offsetX, offsetY);
-    });
-  }
-
-  private drawLetterWithBoundaries_v1(
-    paths: { x: number; y: number }[][][],
-    dims: {
-      maxX: number;
-      maxY: number;
-      minX: number;
-      minY: number;
-      wid: number;
-    }
-  ): void {
-    const scaleUp = 10;
-
-    // Use dims directly for bounding box calculations
-    const boundingBox = {
-      minX: dims.minX,
-      minY: dims.minY,
-      maxX: dims.maxX,
-      maxY: dims.maxY,
-      width: dims.maxX - dims.minX,
-      height: dims.maxY - dims.minY,
-    };
-
-    // Center the letter in the scene
-    const sceneCenterX = this.cameras.main.width / 2;
-    const sceneCenterY = this.cameras.main.height / 2;
-
-    const offset = 1;
-    const offsetX =
-      sceneCenterX -
-      (boundingBox.width * scaleUp) / 2 -
-      boundingBox.minX * scaleUp;
-    const offsetY =
-      sceneCenterY -
-      (boundingBox.height * scaleUp) / 2 -
-      boundingBox.minY * scaleUp;
-
-    console.log(paths);
-
-    paths.forEach((path) => {
-      path.forEach((path) => {
-        // Calculate inner and outer paths
-        const outerPath = this.calculateOffsetPath(path, offset);
-        const innerPath = this.calculateOffsetPath(path, -offset);
-        const outlineThickness = 3;
-
-        // Draw the outer boundary
-        this.letterGraphics.lineStyle(outlineThickness, 0xf000ff, 1); // Red line, 3px thick
-        this.letterGraphics.beginPath();
-        outerPath.forEach((point, index) => {
-          if (index === 0) {
-            this.letterGraphics.moveTo(
-              point.x * scaleUp + offsetX,
-              point.y * scaleUp + offsetY
-            );
-          } else {
-            this.letterGraphics.lineTo(
-              point.x * scaleUp + offsetX,
-              point.y * scaleUp + offsetY
-            );
-          }
-        });
-        this.letterGraphics.strokePath();
-
-        // Draw the inner boundary
-        this.letterGraphics.lineStyle(outlineThickness, 0x00ffff, 1); // Blue line, 3px thick
-        this.letterGraphics.beginPath();
-        innerPath.forEach((point, index) => {
-          if (index === 0) {
-            this.letterGraphics.moveTo(
-              point.x * scaleUp + offsetX,
-              point.y * scaleUp + offsetY
-            );
-          } else {
-            this.letterGraphics.lineTo(
-              point.x * scaleUp + offsetX,
-              point.y * scaleUp + offsetY
-            );
-          }
-        });
-        this.letterGraphics.strokePath();
-
-        this.letterGraphics.lineStyle(2, 0x000000, 0.2); // Faint black line
-        this.letterGraphics.beginPath();
-        path.forEach((point, index) => {
-          if (index === 0) {
-            this.letterGraphics.moveTo(
-              point.x * scaleUp + offsetX,
-              point.y * scaleUp + offsetY
-            );
-          } else {
-            this.letterGraphics.lineTo(
-              point.x * scaleUp + offsetX,
-              point.y * scaleUp + offsetY
-            );
-          }
-        });
-        this.letterGraphics.strokePath();
-
-        // Draw the actual letter path
-        // this.drawDottedLineWithHand(path, scaleUp, 2000, offsetX, offsetY);
-      });
-    });
-
-    // Check if the current chunk index is valid
-    if (this.currentChunkIndex >= paths[0].length) {
-      console.log('All chunks completed!');
-      return;
-    }
-
-    // Access the current chunk
-    const currentChunk = paths[0][this.currentChunkIndex]; // First level (paths[0]) contains chunks
-    console.log('Current Chunk:', currentChunk);
-
-    // Animate the current chunk
-    this.animateChunk(currentChunk, scaleUp, offsetX, offsetY).then(() => {
-      console.log(
-        `Chunk ${this.currentChunkIndex + 1
-        } animation complete. Waiting for child to draw.`
-      );
-    });
-  }
-
-  private drawFullLetterDottedLineWithHand(
-    path: { x: number; y: number }[],
-    scaleUp: number,
-    duration: number,
-    offsetX: number,
-    offsetY: number
-  ): void {
-    const dotRadius = 3; // Radius of each dot
-    const dotSpacing = 10; // Spacing between each dot
-    const totalDots = Math.floor(duration / 50); // Adjust based on animation speed
-    const hand = this.add
-      .sprite(0, 0, 'hand')
-      .setOrigin(0.3, 0.2)
-      .setScale(0.05)
-      .setVisible(false)
-      .setDepth(1);
-
-    const dots: { x: number; y: number }[] = [];
-
-    // Precompute all dot positions
-    path.forEach((point, index) => {
-      if (index < path.length - 1) {
-        const start = path[index];
-        const end = path[index + 1];
-
-        const distance = Phaser.Math.Distance.Between(
-          start.x * scaleUp + offsetX,
-          start.y * scaleUp + offsetY,
-          end.x * scaleUp + offsetX,
-          end.y * scaleUp + offsetY
-        );
-        const direction = new Phaser.Math.Vector2(
-          end.x - start.x,
-          end.y - start.y
-        ).normalize();
-
-        let currentDistance = 0;
-        while (currentDistance < distance) {
-          dots.push({
-            x: start.x * scaleUp + direction.x * currentDistance + offsetX,
-            y: start.y * scaleUp + direction.y * currentDistance + offsetY,
-          });
-          currentDistance += dotSpacing;
-        }
-      }
-    });
-
-    let dotIndex = 0;
-    const interval = setInterval(() => {
-      if (dotIndex >= dots.length) {
-        clearInterval(interval);
-
-        const lastPoint = {
-          x: path[path.length - 2].x * scaleUp + offsetX,
-          y: path[path.length - 2].y * scaleUp + offsetY,
-        };
-        const arrowEnd = {
-          x: path[path.length - 1].x * scaleUp + offsetX,
-          y: path[path.length - 1].y * scaleUp + offsetY,
-        };
-
-        const angle = Phaser.Math.Angle.BetweenPoints(lastPoint, arrowEnd);
-
-        this.letterGraphics.fillStyle(0xff0000, 1); // Red arrow
-        this.letterGraphics.beginPath();
-        this.letterGraphics.moveTo(arrowEnd.x, arrowEnd.y);
-        this.letterGraphics.lineTo(
-          arrowEnd.x - Math.cos(angle - Math.PI / 6) * 15,
-          arrowEnd.y - Math.sin(angle - Math.PI / 6) * 15
-        );
-        this.letterGraphics.lineTo(
-          arrowEnd.x - Math.cos(angle + Math.PI / 6) * 15,
-          arrowEnd.y - Math.sin(angle + Math.PI / 6) * 15
-        );
-        this.letterGraphics.closePath();
-        this.letterGraphics.fillPath();
-
-        hand.destroy();
-        return;
-      }
-
-      const dot = dots[dotIndex];
-      this.letterGraphics.fillStyle(0xff0000, 1); // Red color for dots
-      this.letterGraphics.fillCircle(dot.x, dot.y, dotRadius);
-
-      hand.setPosition(Math.round(dot.x), Math.round(dot.y));
-      hand.setVisible(true);
-
-      dotIndex++;
-    }, duration / totalDots);
-  }
-
   private drawLetterWithBoundaries(
     paths: { x: number; y: number }[][][],
     dims: { maxX: number; maxY: number; minX: number; minY: number; wid: number; }
   ): void {
-    // Calculate offsets to center the letter
-    const { offsetX, offsetY } = this.calculateOffsets(dims, this.scaleUp);
+    // Reset state variables if not reinitializing a completed chunk
+    if (!this.completedChunks.has(this.currentChunkIndex)) {
+      this.currentChunk = [];
+      this.drawnPoints = [];
+    }
 
-    // Step 1: Draw the outer and inner boundaries for all paths
-    paths.forEach((pathGroup) => {
-      pathGroup.forEach((path) => {
-        // Draw faint line for the actual letter path
-        this.letterGraphics.lineStyle(20, 0x00f000, 0.5); // Faint black line
-        this.letterGraphics.beginPath();
-        path.forEach((point, index) => {
-          if (index === 0) {
-            this.letterGraphics.moveTo(
-              point.x * this.scaleUp + offsetX,
-              point.y * this.scaleUp + offsetY
-            );
-          } else {
-            this.letterGraphics.lineTo(
-              point.x * this.scaleUp + offsetX,
-              point.y * this.scaleUp + offsetY
-            );
-          }
-        });
-        this.letterGraphics.strokePath();
+    // Step 1: Calculate offsets to center the letter
+    const offsets = this.calculateOffsets(dims, this.scaleUp);
+    this.offsetX = offsets.offsetX;
+    this.offsetY = offsets.offsetY;
 
-        // Draw faint line for the actual letter path
-        this.letterGraphics.lineStyle(2, 0x000000, 0.2); // Faint black line
-        this.letterGraphics.beginPath();
-        path.forEach((point, index) => {
-          if (index === 0) {
-            this.letterGraphics.moveTo(
-              point.x * this.scaleUp + offsetX,
-              point.y * this.scaleUp + offsetY
-            );
-          } else {
-            this.letterGraphics.lineTo(
-              point.x * this.scaleUp + offsetX,
-              point.y * this.scaleUp + offsetY
-            );
-          }
-        });
-        this.letterGraphics.strokePath();
-      });
-    });
+    // Step 2: Clear previous segments
+    console.log(paths);
+    
+    // this.segmentVisuals[this.currentChunkIndex].forEach(g => g.destroy());
+    this.segmentVisuals[this.currentChunkIndex] = [];
 
-    // Create the mask for the letter area
-    this.createLetterMask(paths[0], offsetX, offsetY); // Use the first level of paths for the mask
+    // Step 3: Draw faint letter paths
+    // check here if already a chunk is drawn
+    if (this.currentChunkIndex <= 0) {
+      this.drawFaintLetterPaths(paths, this.offsetX, this.offsetY);
+    }
 
-    // Step 2: Handle the current chunk animation
+    // Step 4: Create the mask for the letter area
+    // this.createLetterMask(paths[0], this.offsetX, this.offsetY);
+
+    // Step 5: Stop if all chunks are completed
     if (this.currentChunkIndex >= paths[0].length) {
-      console.log('All chunks completed!');
+      this.onLetterCompleted(); // Handle full completion (custom logic)
       return;
     }
 
-    const currentChunk = paths[0][this.currentChunkIndex]; // First level (paths[0]) contains chunks
+    // Step 6: Get current chunk data
+    const currentChunk = paths[0][this.currentChunkIndex];
     console.log('Current Chunk:', currentChunk);
 
-    let currentChunkIndex = this.currentChunkIndex - 1;
+    // Step 7: Transform chunk coordinates
+    const transformedChunk = currentChunk.map(point => ({
+      x: point.x * this.scaleUp + this.offsetX,
+      y: point.y * this.scaleUp + this.offsetY
+    }));
 
-    // Animate the current chunk
-    this.animateChunk(currentChunk, this.scaleUp, offsetX, offsetY).then(() => {
-      // Step 3: Wait for the child to draw the chunk
-      this.waitForChildToDraw(currentChunk, this.scaleUp, offsetX, offsetY).then(() => {
-        // Check if all chunks are completed
-        if (currentChunkIndex >= paths.length - 1) {
-          return; // Stop if all chunks are done
-        }
+    // Step 8: Initialize segments
+    this.segments[this.currentChunkIndex] = this.dividePathIntoSegments(transformedChunk);
+    this.currentChunk = transformedChunk;
 
-        if (currentChunkIndex >= 0) {
-          // Validate the child's drawing
-          const isValid = this.checkValidChunkDraw(
-            this.drawnPoints.map(point => new Phaser.Geom.Point(point.x, point.y)),
-            currentChunk,
-            50 // Tolerance
-          );
-
-          if (isValid) {
-            // Move to the next chunk
-            currentChunkIndex++;
-            this.currentChunkIndex = currentChunkIndex; // Update the class property
-
-            // Reset drawnPoints for the next chunk
-            this.drawnPoints = [];
-
-            // Draw the next chunk
-            this.drawLetterWithBoundaries(paths, dims);
-          } else {
-            // Encourage the child to try again
-            // Replay the current chunk animation
-            this.animateChunk(currentChunk, this.scaleUp, offsetX, offsetY).then(() => {
-              // Wait for the child to draw again
-              this.waitForChildToDraw(currentChunk, this.scaleUp, offsetX, offsetY);
-            });
-          }
-        } else {
-          // Show the first chunk
-          currentChunkIndex++;
-          this.currentChunkIndex = currentChunkIndex; // Update the class property
-        }
-      });
+    // Step 9: Animate and handle drawing
+    this.animateAndWaitForChunk(currentChunk, this.scaleUp, this.offsetX, this.offsetY).then(() => {
+      this.isAnimating = false;
+      console.log('Ready for drawing the current chunk');
     });
+
+    // console.log('test counter', testCounter++);
+
   }
+
+  private onLetterCompleted(): void {
+    console.log('All chunks completed!');
+    console.log('Letter drawing completed!');
+    // Add logic to display success, transition to another activity, etc.
+
+    alert('All chunks completed!, Letter drawing completed!');
+  }
+
+
 
   // MARK: drawDottedLineWithHand
   private drawDottedLineWithHand(
@@ -769,8 +310,8 @@ export class TracingGameScene extends Phaser.Scene {
     offsetY: number
   ): void {
     // Ensure graphics context exists
-    if (!this.letterGraphics) {
-      this.letterGraphics = this.add.graphics();
+    if (!this.letterGraphics[this.currentChunkIndex]) {
+      this.letterGraphics[this.currentChunkIndex] = this.add.graphics();
     }
 
     const dotRadius = 3; // Radius of each dot
@@ -826,22 +367,22 @@ export class TracingGameScene extends Phaser.Scene {
 
     // Debug: Log computed dots
     // Step 1: Draw the faint line for the entire path
-    this.letterGraphics.lineStyle(2, 0x000000, 0.2); // Black line with 20% opacity
-    this.letterGraphics.beginPath();
+    this.letterGraphics[this.currentChunkIndex].lineStyle(2, 0x000000, 0.2); // Black line with 20% opacity
+    this.letterGraphics[this.currentChunkIndex].beginPath();
     path.forEach((point, index) => {
       if (index === 0) {
-        this.letterGraphics.moveTo(
+        this.letterGraphics[this.currentChunkIndex].moveTo(
           point.x * scaleUp + offsetX,
           point.y * scaleUp + offsetY
         );
       } else {
-        this.letterGraphics.lineTo(
+        this.letterGraphics[this.currentChunkIndex].lineTo(
           point.x * scaleUp + offsetX,
           point.y * scaleUp + offsetY
         );
       }
     });
-    this.letterGraphics.strokePath();
+    this.letterGraphics[this.currentChunkIndex].strokePath();
 
     // Step 2: Animate dots and hand along the path
     let dotIndex = 0;
@@ -863,8 +404,8 @@ export class TracingGameScene extends Phaser.Scene {
       }
 
       const dot = dots[dotIndex];
-      this.letterGraphics.fillStyle(0xff0000, 1); // Red color for dots
-      this.letterGraphics.fillCircle(dot.x, dot.y, dotRadius);
+      this.letterGraphics[this.currentChunkIndex].fillStyle(0xff0000, 1); // Red color for dots
+      this.letterGraphics[this.currentChunkIndex].fillCircle(dot.x, dot.y, dotRadius);
 
       // Place arrow images at regular intervals
       if (dotIndex % Math.floor(dotSpacing * 2 / dotRadius) === 0) {
@@ -895,17 +436,38 @@ export class TracingGameScene extends Phaser.Scene {
     return new Promise((resolve) => {
       const dotRadius = 3; // Radius of each dot
       const dotSpacing = 10; // Spacing between each dot
-      const arrowSpacing = 25; // Spacing between arrows (larger than dotSpacing)
+      const dashSpacing = 10; // Spacing between dashes
       const duration = 2000; // Total duration for the chunk animation
       const arrowScale = 0.05; // Scale for the arrow image
       const dots: { x: number; y: number; angle?: number }[] = [];
+      let arrow: Phaser.GameObjects.Image;
+      // Initialize letterGraphics if it does not exist
+      // if (!this.letterGraphics[this.currentChunkIndex]) {
+        this.letterGraphics[this.currentChunkIndex] = this.add.graphics();
 
+        this.chunkElements.push(this.letterGraphics[this.currentChunkIndex]);
+        // change the chunk depth if the chunk index is greater than 0
+        if (this.currentChunkIndex > 0) {
+          this.letterGraphics[this.currentChunkIndex].setDepth(this.handDepth);
+
+          // Update the hand depth
+          this.handDepth += this.currentChunkIndex * 3 + 1;
+        }
+      // }
+
+      // Clear any existing interval
+      if (this.animationInterval) {
+        clearInterval(this.animationInterval);
+      }
+
+      // Add a hand sprite to guide the drawing
       const hand = this.add
         .sprite(0, 0, 'hand')
         .setOrigin(0.3, 0.2)
         .setScale(0.05)
         .setVisible(false)
-        .setDepth(1);
+        .setDepth(this.handDepth);
+
 
       // Precompute dots for the entire chunk (single path)
       chunk.forEach((point, index) => {
@@ -925,6 +487,7 @@ export class TracingGameScene extends Phaser.Scene {
             end.y - start.y
           ).normalize();
 
+          // Adjust the angle to ensure the arrow points up
           const angle = Phaser.Math.Angle.Between(
             start.x * scaleUp + offsetX,
             start.y * scaleUp + offsetY,
@@ -941,79 +504,120 @@ export class TracingGameScene extends Phaser.Scene {
             });
             currentDistance += dotSpacing;
           }
-        }
-      });
 
+          
+        }
+        console.log('dots', dots[dots.length - 1]);
+      });
       // Step 1: Draw a faint line for the path
-      this.letterGraphics.lineStyle(2, 0x000000, 0.2); // Black line with 20% opacity
-      this.letterGraphics.beginPath();
+      this.letterGraphics[this.currentChunkIndex].lineStyle(20, this.currentChunkColor, 1); // Black line with 50% opacity
+
+      // change the chunk depth if the chunk index is greater than 0
+      if (this.currentChunkIndex > 0) {
+        this.letterGraphics[this.currentChunkIndex].setDepth(this.handDepth);
+      }
+
+      this.letterGraphics[this.currentChunkIndex].beginPath();
       chunk.forEach((point, index) => {
         if (index === 0) {
-          this.letterGraphics.moveTo(
+          this.letterGraphics[this.currentChunkIndex].moveTo(
             point.x * scaleUp + offsetX,
             point.y * scaleUp + offsetY
           );
         } else {
-          this.letterGraphics.lineTo(
+          this.letterGraphics[this.currentChunkIndex].lineTo(
             point.x * scaleUp + offsetX,
             point.y * scaleUp + offsetY
           );
         }
-      });
-      this.letterGraphics.strokePath();
 
-      // Step 2: Animate dots, hand, and arrows along the path
+        // Pushing the path to the current chunk
+        this.currentChunk.push({ x: point.x * scaleUp + offsetX, y: point.y * scaleUp + offsetY });
+      });
+
+      this.letterGraphics[this.currentChunkIndex].strokePath();
+
+            // Step 2: Animate dots, hand, and arrows along the path
       let dotIndex = 0;
       const totalDots = dots.length;
       const dotDuration = duration / totalDots;
-
-      const interval = setInterval(() => {
-        if (dotIndex >= dots.length) {
-          clearInterval(interval);
-          hand.destroy(); // Remove the hand after animation
-
-          // Draw the final arrow at the end of the path
-          const finalDot = dots[dots.length - 1];
-          if (finalDot.angle !== undefined) {
-            if (dotIndex < dots.length - 2) {
-              this.add
-                .image(finalDot.x, finalDot.y, 'arrow')
-                .setOrigin(0.5, 0.5)
-                .setScale(arrowScale)
-                .setRotation(finalDot.angle + Math.PI / 2);
-            }
-          } // Adjust rotation for arrow direction
-
-          resolve(); // Signal animation completion
-          return;
-        }
-
-        const dot = dots[dotIndex];
-
-        // Draw dots at regular intervals
-        if (dotIndex % Math.floor(dotSpacing / dotRadius) === 0) {
-          this.letterGraphics.fillStyle(0xff0000, 1); // Red color for dots
-          this.letterGraphics.fillCircle(dot.x, dot.y, dotRadius);
-        }
-
-        // Draw arrows at larger intervals
-        if (dotIndex % Math.floor(arrowSpacing / dotRadius) === 0 && dot.angle !== undefined) {
-          this.add
-            .image(dot.x, dot.y, 'arrow')
-            .setOrigin(0.5, 0.5)
-            .setScale(arrowScale)
-            .setRotation(dot.angle + Math.PI / 2); // Adjust rotation for arrow direction
-        }
-
-        // Move the hand
-        hand.setPosition(Math.round(dot.x), Math.round(dot.y));
-        hand.setVisible(true);
-
-        dotIndex++;
+      
+      // Store the interval ID
+      this.animationInterval = setInterval(() => {
+          if (dotIndex >= dots.length) {
+              clearInterval(this.animationInterval!);
+              hand.destroy(); // Remove the hand after animation
+      
+              // Draw the final arrow at the end of the path
+              const finalDot = dots[dots.length - 1];
+              if (finalDot.angle !== undefined) {
+                  // Adjust the angle to ensure the arrow points in the correct direction
+                  const adjustedAngle = finalDot.angle - Math.PI / 2;
+                  console.log('dot angle', finalDot.angle, adjustedAngle);
+      
+                  // arrow = this.add
+                  //     .image(finalDot.x, finalDot.y, 'arrow')
+                  //     .setOrigin(0.5, 0.5)
+                  //     .setScale(arrowScale)
+                  //     .setTintFill(this.arrowColor)
+                  //     .setTint(this.arrowColor)
+                  //     .setRotation(Math.abs(adjustedAngle)) // Adjust rotation for arrow direction
+                  //     .setDepth(this.handDepth); // Ensure arrow is above the hand
+      
+                  // this.chunkElements.push(arrow);
+              }
+      
+              resolve(); // Signal animation completion
+              return;
+          }
+      
+          const dot = dots[dotIndex];
+      
+          // Draw the starting dot
+          if (dotIndex === 0) {
+              this.letterGraphics[this.currentChunkIndex].fillStyle(this.firstDotColor, 1); // Green color for the starting dot
+              this.letterGraphics[this.currentChunkIndex].fillCircle(dot.x, dot.y, dotRadius);
+          } else if (dotIndex === dots.length - 1) {
+              // Draw the final arrow at the end of the path
+      
+              console.log('dot angle', dot.angle, (dot.angle ?? 0) - Math.PI / 2);
+              
+              if (dot.angle !== undefined) {
+                  // Adjust the angle to ensure the arrow points in the correct direction
+                  const adjustedAngle = dot.angle - Math.PI / 2;
+                  arrow = this.add
+                      .image(dot.x, dot.y, 'arrow')
+                      .setOrigin(0.5, 0.5)
+                      .setScale(arrowScale)
+                      .setTintFill(this.arrowColor)
+                      .setTint(this.arrowColor)
+                      .setRotation(adjustedAngle) // Adjust rotation for arrow direction
+                      .setDepth(this.handDepth); // Ensure arrow is above the hand
+      
+                  this.chunkElements.push(arrow);
+              }
+          } else {
+              // Draw dashes at regular intervals
+              if (dotIndex % Math.floor(dashSpacing / dotSpacing + 1) === 0) {
+                  const nextDot = dots[dotIndex + 2]; // Skip one dot to create space between dashes
+                  if (nextDot && dotIndex < dots.length - 4) { // Check if nextDot exists
+                      this.letterGraphics[this.currentChunkIndex].fillStyle(this.dotsColor, 1); // Red color for dashes
+                      this.letterGraphics[this.currentChunkIndex].fillCircle(dot.x, dot.y, dotRadius);
+                  }
+              }
+          }
+      
+          // Move the hand
+          hand.setPosition(Math.round(dot.x), Math.round(dot.y));
+          hand.setVisible(true);
+      
+          dotIndex++;
       }, dotDuration);
     });
   }
 
+
+  // MARK: waitForChildToDraw
   private waitForChildToDraw(
     chunk: { x: number; y: number }[],
     scaleUp: number,
@@ -1028,93 +632,6 @@ export class TracingGameScene extends Phaser.Scene {
     });
   }
 
-  private checkValidChunkDraw(
-    playerPoints: Phaser.Geom.Point[], // The points drawn by the player
-    segmentPoints: { x: number; y: number }[], // The points of the current segment
-    tolerance: number = 20 // How close the drawing needs to be to the segment
-  ): boolean {
-    // Generate outer points for the segment (to account for thickness)
-    const outerPoints = this.generateOuterPoints(segmentPoints, 10);
-
-    // Count how many player points are close to the segment
-    let correctPoints = 0;
-    playerPoints.forEach((playerPoint) => {
-      const nearestPoint = this.findNearestPointOnPath(playerPoint, outerPoints);
-      if (
-        Phaser.Math.Distance.Between(playerPoint.x, playerPoint.y, nearestPoint.x, nearestPoint.y) <
-        tolerance
-      ) {
-        correctPoints++;
-      }
-    });
-
-    // Calculate accuracy
-    const accuracy = (correctPoints / outerPoints.length) * 100;
-
-    // Return true if accuracy is above a threshold (e.g., 80%)
-    return accuracy > 80;
-  }
-
-  private generateOuterPoints(
-    path: { x: number; y: number }[],
-    thickness: number
-  ): { x: number; y: number }[] {
-    const outerPoints: { x: number; y: number }[] = [];
-    for (let i = 0; i < path.length; i++) {
-      const point = path[i];
-      const prevPoint = path[i - 1] || point;
-      const nextPoint = path[i + 1] || point;
-
-      // Calculate the direction of the line
-      const angle = Phaser.Math.Angle.BetweenPoints(prevPoint, nextPoint);
-      const perpendicularAngle = angle + Math.PI / 2; // Perpendicular to the line
-
-      // Calculate outer points
-      const outerPoint1 = {
-        x: point.x + Math.cos(perpendicularAngle) * thickness,
-        y: point.y + Math.sin(perpendicularAngle) * thickness,
-      };
-      const outerPoint2 = {
-        x: point.x - Math.cos(perpendicularAngle) * thickness,
-        y: point.y - Math.sin(perpendicularAngle) * thickness,
-      };
-
-      outerPoints.push(outerPoint1, outerPoint2);
-    }
-    return outerPoints;
-  }
-
-  private findNearestPointOnPath(
-    playerPoint: Phaser.Geom.Point,
-    pathPoints: { x: number; y: number }[]
-  ): { x: number; y: number } {
-    let nearestPoint = pathPoints[0];
-    let minDistance = Phaser.Math.Distance.Between(playerPoint.x, playerPoint.y, nearestPoint.x, nearestPoint.y);
-
-    for (const point of pathPoints) {
-      const distance = Phaser.Math.Distance.Between(playerPoint.x, playerPoint.y, point.x, point.y);
-      if (distance < minDistance) {
-        minDistance = distance;
-        nearestPoint = point;
-      }
-    }
-
-    return nearestPoint;
-  }
-
-  /**
-   * !Determines if a given point is inside a polygon boundary.
-   */
-  private isPointInsideBoundary(
-    point: Phaser.Geom.Point,
-    boundaryPoints: Phaser.Geom.Point[]
-  ): boolean {
-    return Phaser.Geom.Polygon.Contains(
-      new Phaser.Geom.Polygon(boundaryPoints),
-      point.x,
-      point.y
-    );
-  }
 
   // MARK: Drawing
   /* ------------------------------ drawind start ----------------------------- */
@@ -1125,66 +642,282 @@ export class TracingGameScene extends Phaser.Scene {
     this.childDrawingGraphics.clear();
 
     // Apply the mask to the child's drawing
-    if (this.letterMask) {
-      this.childDrawingGraphics.setMask(this.letterMask);
+    // if (this.letterMask) {
+    //   this.childDrawingGraphics.setMask(this.letterMask);
+    // }
+
+    this.childDrawingGraphics.alpha = 0;
+
+    const startPoint = new Phaser.Geom.Point(pointer.x, pointer.y);
+    const isValidStart = this.segments.some(segment =>
+      Phaser.Geom.Rectangle.ContainsPoint(segment[this.currentChunkIndex].bounds, startPoint)
+    );
+
+    if (!isValidStart) {
+      this.resetCurrentDrawing(); // Reset if starting from an invalid position
+      console.log('Invalid start position, resetting current drawing. Total segments:', this.segments[this.currentChunkIndex].length);
+
+      return;
     }
 
-    this.childDrawingGraphics.lineStyle(50, 0x1f5a00, 1);
-    this.childDrawingGraphics.beginPath();
+    // Allow restarting from the last valid position or beginning
+    if (!this.lastValidPosition) {
+      this.drawnPoints = [];
+      this.currentSegmentIndex = 0;
+    } else {
 
-    this.drawnPoints = [{ x: pointer.x, y: pointer.y }];
+      // Start from the last valid position
+      this.drawnPoints.push(this.lastValidPosition);
+    }
+
   }
 
   private continueDrawing(pointer: Phaser.Input.Pointer): void {
-    if (this.isDrawing) {
-      const currentPoint = new Phaser.Geom.Point(pointer.x, pointer.y);
+    if (!this.isDrawing) return;
 
-      // Draw a line from the last point to the current point
-      if (this.drawnPoints.length > 0) {
-        const lastPoint = this.drawnPoints[this.drawnPoints.length - 1];
-        this.childDrawingGraphics.lineTo(currentPoint.x, currentPoint.y);
-        this.childDrawingGraphics.strokePath();
+    const point = new Phaser.Geom.Point(pointer.x, pointer.y);
+    let isOnPath = false;
+    const tolerance = 10; // Allow a margin of error around the segment bounds
+
+    // Iterate through segments to check containment and update
+    this.segments[this.currentChunkIndex].forEach((segment, index) => {
+      // Expand the segment bounds by the tolerance
+      const expandedBounds = Phaser.Geom.Rectangle.Clone(segment.bounds);
+      expandedBounds.x -= tolerance;
+      expandedBounds.y -= tolerance;
+      expandedBounds.width += tolerance * 2;
+      expandedBounds.height += tolerance * 2;
+
+      if (Phaser.Geom.Rectangle.ContainsPoint(expandedBounds, point)) {
+        isOnPath = true;
+
+        // Mark as active segment
+        if (!segment.completed) {
+          this.updateSegmentColor(index, this.drawingChunkColor); // Red for active segment
+          this.hitsPerSegment[index] = (this.hitsPerSegment[index] || 0) + 1;
+
+          // Check for completion
+          if (this.hitsPerSegment[index] >= this.minHitsPerSegment) {
+            // console.log(`Segment ${index} completed.`);
+            segment.completed = true;
+          }
+        }
       }
+    });
 
-      // Add the current point to the drawnPoints array
-      this.drawnPoints.push({ x: pointer.x, y: pointer.y });
+    // If the user goes off the path, reset the drawing
+    if (!isOnPath) {
+      console.log('User went off the path. Resetting progress.');
+      this.resetCurrentDrawing();
+      return;
     }
+
+    // Add point to drawn path
+    this.drawnPoints.push(point);
   }
 
-  private stopDrawing(): void {
+  private stopDrawing(paths: { x: number; y: number }[][][]): void {
     this.isDrawing = false;
     console.log('Stopped Drawing');
-    // Clip the child's drawing to the visible area
-    // this.clipDrawingToVisibleArea();
-    // Optionally validate the tracing here
-    // this.checkTracing();
+
+    // Calculate the number of completed segments
+    const completedSegments = this.segments[this.currentChunkIndex].filter(segment => segment.completed).length;
+    const totalSegments = this.segments[this.currentChunkIndex].length;
+    const completionRate = (completedSegments / totalSegments) * 100;
+
+    console.log(`Completion Rate: ${completionRate}%`);
+
+    // If at least 80% of the segments are completed, move to the next chunk
+    if (completionRate >= this.segmentDrawSuccessRate) {
+      this.completedChunks.add(this.currentChunkIndex); // Mark this chunk as completed
+      this.chunkCompleted(this.segments[this.currentChunkIndex]);
+      ++this.currentChunkIndex;
+      this.segments[this.currentChunkIndex] = []
+      console.log('Chunk completed. Moving to the next chunk.');
+
+      // clear the chunk elements
+      this.chunkElements.forEach(element => element.destroy());
+
+      // Draw the next chunk
+      this.drawLetterWithBoundaries(this.letterData.paths, this.letterData.dims);
+    } else {
+      console.log('Chunk not completed. Try again.');
+      this.resetCurrentDrawing(); // Optionally reset the current chunk
+    }
+
+    // log all data
+    // console.log('drawnPoints ');
+    // console.log(this.drawnPoints);
+    // console.log('segments ');
+    // console.log(this.segments[this.currentChunkIndex]);
+    // console.log('completedChunks ');
+    // console.log(this.completedChunks);
+    // console.log('currentChunkIndex ');
+    // console.log(this.currentChunkIndex);
+    // console.log('currentChunk ');
+    // console.log(this.currentChunk);
+
+
   }
 
-  private isPointInVisibleArea(point: Phaser.Geom.Point): boolean {
-    const tolerance = 20; // Thickness of the visible area
-    const pathPoints = this.letterData.paths; // The path of the letter
 
-    // Check if the point is close to any point in the path
-    for (const pathPoint of pathPoints) {
-      // Apply scale and offset to the path point
-      const scaledPathPoint = {
-        x: pathPoint.x * this.scaleUp + this.offsetX,
-        y: pathPoint.y * this.scaleUp + this.offsetY,
-      };
+  private dividePathIntoSegments(
+    path: { x: number; y: number }[],
+    segmentHeight: number = 5,    // Width across the path (thickness)
+    segmentWidth: number = 20   // Length along the path
+  ): LetterSegment[] {
 
-      const distance = Phaser.Math.Distance.Between(
-        point.x,
-        point.y,
-        scaledPathPoint.x,
-        scaledPathPoint.y
-      );
+    console.log('SEGMENTS FROM DIVIDE PATH INTO SEGMENTS', this.segments);
 
-      if (distance <= tolerance) {
-        return true; // The point is within the visible area
+    const segments: LetterSegment[] = [];
+
+    for (let i = 0; i < path.length - 1; i++) {
+      const pathStart = new Phaser.Geom.Point(path[i].x, path[i].y);
+      const pathEnd = new Phaser.Geom.Point(path[i + 1].x, path[i + 1].y);
+
+      const distance = Phaser.Math.Distance.BetweenPoints(pathStart, pathEnd);
+      const direction = new Phaser.Math.Vector2(pathEnd.x - pathStart.x, pathEnd.y - pathStart.y).normalize();
+      const angle = Phaser.Math.Angle.BetweenPoints(pathStart, pathEnd);
+
+      let currentDistance = 0;
+      while (currentDistance < distance) {
+        const segmentStart = new Phaser.Geom.Point(
+          pathStart.x + direction.x * currentDistance,
+          pathStart.y + direction.y * currentDistance
+        );
+
+        const segmentEnd = new Phaser.Geom.Point(
+          pathStart.x + direction.x * (currentDistance + segmentHeight),
+          pathStart.y + direction.y * (currentDistance + segmentHeight)
+        );
+
+        const center = new Phaser.Geom.Point(
+          (segmentStart.x + segmentEnd.x) / 2,
+          (segmentStart.y + segmentEnd.y) / 2
+        );
+
+        segments.push({
+          start: segmentStart,
+          end: segmentEnd,
+          bounds: new Phaser.Geom.Rectangle(
+            center.x - segmentHeight / 2,
+            center.y - segmentWidth / 2,
+            segmentHeight,
+            segmentWidth
+          ),
+          angle: angle,
+          completed: false
+        });
+
+        currentDistance += segmentHeight;
       }
     }
 
-    return false; // The point is outside the visible area
+    // this.drawDebugSegments(segments);
+    this.segments[this.currentChunkIndex] = segments;
+    return segments;
+  }
+
+  private drawDebugSegments(segments: LetterSegment[]): void {
+    segments.forEach((segment) => {
+      const graphics = this.add.graphics();
+      // graphics.lineStyle(1, 0xff0000, 1).setDepth(1);
+      // graphics.fillStyle(0x00ff00, 1);
+
+      // Get dimensions from bounds
+      const rectWidth = segment.bounds.width;
+      const rectHeight = segment.bounds.height;
+      const centerX = segment.bounds.centerX;
+      const centerY = segment.bounds.centerY;
+      const angle = segment.angle;
+
+      // Calculate corners relative to center
+      const halfW = rectWidth / 2;
+      const halfH = rectHeight / 2;
+      const corners = [
+        { x: -halfW, y: -halfH },
+        { x: halfW, y: -halfH },
+        { x: halfW, y: halfH },
+        { x: -halfW, y: halfH }
+      ];
+
+      // Rotate and translate corners
+      const rotatedCorners = corners.map(p => ({
+        x: centerX + (p.x * Math.cos(angle) - p.y * Math.sin(angle)),
+        y: centerY + (p.x * Math.sin(angle) + p.y * Math.cos(angle))
+      }));
+
+      // Draw rotated rectangle
+      graphics.beginPath();
+      graphics.moveTo(rotatedCorners[0].x, rotatedCorners[0].y);
+      rotatedCorners.forEach(p => graphics.lineTo(p.x, p.y));
+      graphics.closePath();
+
+      graphics.fillPath();
+      graphics.strokePath();
+
+      this.segmentVisuals[this.currentChunkIndex].push(graphics);
+    });
+  }
+  private updateSegmentColor(segmentIndex: number, color: number): void {
+    if (this.segmentVisuals[this.currentChunkIndex][segmentIndex]) {
+      const graphics = this.segmentVisuals[this.currentChunkIndex][segmentIndex];
+      const segment = this.segments[this.currentChunkIndex][segmentIndex];
+
+      graphics.clear();
+
+      // Calculate angle from segment direction
+      const angle = Phaser.Math.Angle.BetweenPoints(segment.start, segment.end);
+
+      // Get segment dimensions
+      const centerX = segment.bounds.centerX;
+      const centerY = segment.bounds.centerY;
+      const halfWidth = segment.bounds.width / 2;
+      const halfHeight = segment.bounds.height / 2;
+
+      // Calculate rotated corners
+      const corners = [
+        { x: -halfWidth, y: -halfHeight },
+        { x: halfWidth, y: -halfHeight },
+        { x: halfWidth, y: halfHeight },
+        { x: -halfWidth, y: halfHeight }
+      ].map(p => ({
+        x: centerX + (p.x * Math.cos(angle) - p.y * Math.sin(angle)),
+        y: centerY + (p.x * Math.sin(angle) + p.y * Math.cos(angle))
+      }));
+
+      // CHange the depth of the graphics according to the chunk index
+      graphics.setDepth(this.handDepth + 1);
+      
+      // Redraw with new color
+      graphics.fillStyle(color, 1); // Fill color with some transparency
+      graphics.lineStyle(2, color, 1); // Border color
+      
+
+      
+      graphics.beginPath();
+      graphics.moveTo(corners[0].x, corners[0].y);
+      corners.slice(1).forEach(p => graphics.lineTo(p.x, p.y));
+      graphics.closePath();
+      graphics.fillPath(); // Fill the segment
+      graphics.strokePath(); // Draw the border
+    }
+  }
+
+  // change the color of the chunk to green
+  private chunkCompleted(segments: LetterSegment[]): void {
+    segments.forEach((segment, index) => {
+      this.updateSegmentColor(index, this.completedSegmentColor);
+    });
+  }
+
+  private resetCurrentDrawing(): void {
+    const currentChunkSegments = this.segments[this.currentChunkIndex];
+    this.drawnPoints = []; // Clear drawn points
+    this.currentSegmentIndex = 0; // Reset to the first segment
+    this.segmentVisuals[this.currentChunkIndex].forEach(g => g.clear()); // Clear all segment visuals
+    currentChunkSegments.forEach(segment => (segment.completed = false)); // Reset segment completion
+    this.drawDebugSegments(currentChunkSegments); // Redraw the original segments
   }
 
   // MARK: Letter Mask
@@ -1267,238 +1000,6 @@ export class TracingGameScene extends Phaser.Scene {
     // Create a mask from the graphics object
     this.letterMask = maskGraphics.createGeometryMask();
   }
-
-  private clipDrawingToVisibleArea(): void {
-    // Create a mask for the visible area
-    const mask = this.add.graphics();
-    mask.fillStyle(0xffffff, 1);
-    mask.beginPath();
-
-    // Calculate offsets to center the letter
-    const { offsetX, offsetY } = this.calculateOffsets(this.letterData.dims, this.scaleUp);
-
-    // Draw the thick path as the mask (with scale and offset)
-    this.letterData.paths.forEach((point: { x: number; y: number }, index: number) => {
-      const scaledPoint = {
-        x: point.x * this.scaleUp + offsetX,
-        y: point.y * this.scaleUp + offsetY,
-      };
-
-      if (index === 0) {
-        mask.moveTo(scaledPoint.x, scaledPoint.y);
-      } else {
-        mask.lineTo(scaledPoint.x, scaledPoint.y);
-      }
-    });
-
-    mask.closePath();
-    mask.fillPath();
-
-    // Apply the mask to the child's drawing
-    this.childDrawingGraphics.setMask(mask.createGeometryMask());
-  }
-
-  private findIntersectionWithBoundary(
-    startPoint: Phaser.Geom.Point,
-    endPoint: Phaser.Geom.Point,
-    boundaryPoints: Phaser.Geom.Point[]
-  ): Phaser.Geom.Point | null {
-    // Ensure boundaryPoints is not empty
-    if (boundaryPoints.length === 0) {
-      return null;
-    }
-
-    const boundaryPolygon = new Phaser.Geom.Polygon(boundaryPoints);
-    const segment = new Phaser.Geom.Line(
-      startPoint.x,
-      startPoint.y,
-      endPoint.x,
-      endPoint.y
-    );
-
-    // Get the intersection result
-    const intersectionResult = Phaser.Geom.Intersects.GetLineToPolygon(
-      segment,
-      boundaryPolygon
-    );
-
-    console.log(intersectionResult);
-
-    // Check if the result is a Vector4 (Phaser 3.60+)
-    if (intersectionResult && typeof intersectionResult.x === 'number') {
-      // Return the intersection point as a Phaser.Geom.Point
-      return new Phaser.Geom.Point(intersectionResult.x, intersectionResult.y);
-    }
-
-    // If no intersection, return null
-    return null;
-  }
-
-  private isPointWithinPath(
-    point: Phaser.Geom.Point,
-    path: Phaser.Geom.Point[]
-  ): boolean {
-    const tolerance = 20; // Allowable distance from the path
-    return path.some(
-      (pathPoint) =>
-        Phaser.Math.Distance.BetweenPoints(point, pathPoint) < tolerance
-    );
-  }
-
-  // MARK: - Tracing check
-  private checkTracing(): void {
-    const tolerance = 20; // How close the drawing needs to be to the path
-    let matchedPathPoints = 0; // Number of real path points covered
-    const totalPathPoints = this.targetPath.length;
-
-    // Iterate over each point in the real path
-    this.targetPath.forEach((pathPoint) => {
-      const isMatched = this.drawnPoints.some((drawnPoint) => {
-        const drawn = new Phaser.Geom.Point(drawnPoint.x, drawnPoint.y);
-        return Phaser.Math.Distance.BetweenPoints(drawn, pathPoint) < tolerance;
-      });
-
-      if (isMatched) {
-        matchedPathPoints++;
-      }
-    });
-
-    // Calculate coverage as a percentage
-    const coverage = (matchedPathPoints / totalPathPoints) * 100;
-    console.log(`Path Coverage: ${coverage.toFixed(2)}%`);
-
-    // Provide feedback
-    if (coverage > 90) {
-      this.add
-        .text(400, 500, 'Great job!', { fontSize: '32px', color: '#0f0' })
-        .setOrigin(0.5);
-    } else {
-      this.add
-        .text(400, 500, 'Try again!', { fontSize: '32px', color: '#f00' })
-        .setOrigin(0.5);
-    }
-  }
-
-  /* ------------------------------ drawind End ----------------------------- */
-
-  private checkTracing1(): void {
-    const tolerance = 20; // How close the drawing needs to be to the path
-    let matchedPathPoints = 0; // Number of real path points covered
-    const totalPathPoints = this.targetPath.length;
-    let isOutOfBounds = false; // Flag to detect out-of-bounds drawing
-
-    // Iterate over each point in the real path
-    this.targetPath.forEach((pathPoint) => {
-      const isMatched = this.drawnPoints.some((drawnPoint) => {
-        const drawn = new Phaser.Geom.Point(drawnPoint.x, drawnPoint.y);
-        return Phaser.Math.Distance.BetweenPoints(drawn, pathPoint) < tolerance;
-      });
-
-      if (isMatched) {
-        matchedPathPoints++;
-      }
-    });
-
-    // Check if any drawn point is outside the outer boundary
-    this.drawnPoints.forEach((drawnPoint) => {
-      const drawn = new Phaser.Geom.Point(drawnPoint.x, drawnPoint.y);
-      const nearestOuterPoint = this.findNearestPointOnPath(
-        drawn,
-        this.outerPoints
-      );
-
-      // If the drawn point is farther from the nearest outer point than the tolerance, it's out of bounds
-      if (
-        Phaser.Math.Distance.BetweenPoints(drawn, nearestOuterPoint) > tolerance
-      ) {
-        isOutOfBounds = true;
-      }
-    });
-
-    // Calculate coverage as a percentage
-    const coverage = (matchedPathPoints / totalPathPoints) * 100;
-    console.log(`Path Coverage: ${coverage.toFixed(2)}%`);
-    console.log(`Out of Bounds: ${isOutOfBounds}`);
-
-    // Provide feedback
-    if (coverage > 92) {
-      this.add
-        .text(400, 500, 'Great job!', { fontSize: '32px', color: '#0f0' })
-        .setOrigin(0.5);
-    } else if (isOutOfBounds) {
-      this.add
-        .text(400, 500, 'You drew outside the boundaries!', {
-          fontSize: '32px',
-          color: '#f00',
-        })
-        .setOrigin(0.5);
-    } else {
-      this.add
-        .text(400, 500, 'Try again!', { fontSize: '32px', color: '#f00' })
-        .setOrigin(0.5);
-    }
-  }
-
-  // private findNearestPointOnPath(
-  //   drawnPoint: Phaser.Geom.Point,
-  //   pathPoints: Phaser.Geom.Point[]
-  // ): Phaser.Geom.Point {
-  //   let nearestPoint = pathPoints[0];
-  //   let minDistance = Phaser.Math.Distance.Between(
-  //     drawnPoint.x,
-  //     drawnPoint.y,
-  //     nearestPoint.x,
-  //     nearestPoint.y
-  //   );
-
-  //   for (const point of pathPoints) {
-  //     const distance = Phaser.Math.Distance.Between(
-  //       drawnPoint.x,
-  //       drawnPoint.y,
-  //       point.x,
-  //       point.y
-  //     );
-  //     if (distance < minDistance) {
-  //       minDistance = distance;
-  //       nearestPoint = point;
-  //     }
-  //   }
-
-  //   return nearestPoint;
-  // }
-
-  // MARK: ANIMATIONS
-  // private showHandAnimation(
-  //   path: { x: number; y: number }[],
-  //   scaleUp: number
-  // ): void {
-  //   if (!path || path.length < 2) return; // Ensure path has enough points to animate
-
-  //   // Add the hand sprite
-  //   const hand = this.add.sprite(
-  //     path[0].x * scaleUp,
-  //     path[0].y * scaleUp,
-  //     'hand'
-  //   );
-  //   hand.setScale(0.06); // Adjust the size of the hand as needed
-
-  //   // Create an array of tween targets from the path points
-  //   const tweens = path.map((point) => ({
-  //     x: point.x * scaleUp,
-  //     y: point.y * scaleUp,
-  //     duration: 200, // Duration for moving between points (adjust for speed)
-  //   }));
-
-  //   // Animate the hand along the path using the tweens
-  //   this.tweens.timeline({
-  //     targets: hand,
-  //     tweens: tweens,
-  //     ease: 'Linear', // Linear movement
-  //     onComplete: () => {
-  //       hand.destroy(); // Remove the hand after completing the animation
-  //     },
-  //   });
-  // }
 
   override update() {
     // Optionally add any animations or real-time updates
