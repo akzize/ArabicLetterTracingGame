@@ -34,9 +34,10 @@ export class TracingGameScene extends Phaser.Scene {
   private letterMask: any;
 
   private scaleUp: number = 10;
-  private offsetX: number = 0;
-  private offsetY: number = 0;
+  private offsetX: number = 10;
+  private offsetY: number = 10;
 
+  private currentLetterIndex: number = 0; // Stores the index of the current chunk being processed
   private currentChunkIndex: number = 0; // Stores the index of the current chunk being processed
   private currentChunk: { x: number; y: number }[] = [];
 
@@ -88,6 +89,10 @@ export class TracingGameScene extends Phaser.Scene {
     // Load the JSON file containing the letter paths
     this.load.json('letters', 'assets/letters.json');
     this.load.image('arrow', 'assets/arrows/arrow-sm-up.svg');
+    this.load.image('arrow-up', 'assets/arrows/arrow-sm-up.svg');
+    this.load.image('arrow-down', 'assets/arrows/arrow-sm-down.svg');
+    this.load.image('arrow-left', 'assets/arrows/arrow-sm-left.svg');
+    this.load.image('arrow-right', 'assets/arrows/arrow-sm-right.svg');
     this.load.image('hand', 'assets/hands/hand.png'); // Replace with your hand image path
   }
 
@@ -187,7 +192,7 @@ export class TracingGameScene extends Phaser.Scene {
  */
   private drawFaintLetterPaths(paths: { x: number; y: number }[][][], offsetX: number, offsetY: number): void {
     console.log(paths);
-    
+
     paths.forEach((pathGroup) => {
       pathGroup.forEach((path) => {
         // Draw faint line for the actual letter path
@@ -248,7 +253,7 @@ export class TracingGameScene extends Phaser.Scene {
 
     // Step 2: Clear previous segments
     console.log(paths);
-    
+
     // this.segmentVisuals[this.currentChunkIndex].forEach(g => g.destroy());
     this.segmentVisuals[this.currentChunkIndex] = [];
 
@@ -259,16 +264,16 @@ export class TracingGameScene extends Phaser.Scene {
     }
 
     // Step 4: Create the mask for the letter area
-    // this.createLetterMask(paths[0], this.offsetX, this.offsetY);
+    // this.createLetterMask(paths[this.currentLetterIndex], this.offsetX, this.offsetY);
 
     // Step 5: Stop if all chunks are completed
-    if (this.currentChunkIndex >= paths[0].length) {
+    if (this.currentChunkIndex >= paths[this.currentLetterIndex].length) {
       this.onLetterCompleted(); // Handle full completion (custom logic)
       return;
     }
 
     // Step 6: Get current chunk data
-    const currentChunk = paths[0][this.currentChunkIndex];
+    const currentChunk = paths[this.currentLetterIndex][this.currentChunkIndex];
     console.log('Current Chunk:', currentChunk);
 
     // Step 7: Transform chunk coordinates
@@ -299,133 +304,6 @@ export class TracingGameScene extends Phaser.Scene {
     alert('All chunks completed!, Letter drawing completed!');
   }
 
-
-
-  // MARK: drawDottedLineWithHand
-  private drawDottedLineWithHand(
-    path: { x: number; y: number }[],
-    scaleUp: number,
-    duration: number,
-    offsetX: number,
-    offsetY: number
-  ): void {
-    // Ensure graphics context exists
-    if (!this.letterGraphics[this.currentChunkIndex]) {
-      this.letterGraphics[this.currentChunkIndex] = this.add.graphics();
-    }
-
-    const dotRadius = 3; // Radius of each dot
-    const dotSpacing = 15; // Spacing between each dot
-    const arrowScale = 0.5; // Adjusted scale for the arrow image
-    const totalDots = Math.floor(duration / 50); // Adjust based on animation speed
-
-    // Add a hand sprite to guide the drawing
-    const hand = this.add
-      .sprite(0, 0, 'hand')
-      .setOrigin(0.5, 0.5)
-      .setScale(0.05)
-      .setVisible(false)
-      .setDepth(1);
-
-    const dots: { x: number; y: number; angle: number }[] = [];
-
-    // Precompute all dot positions and their angles
-    path.forEach((point, index) => {
-      if (index < path.length - 1) {
-        const start = path[index];
-        const end = path[index + 1];
-
-        const distance = Phaser.Math.Distance.Between(
-          start.x * scaleUp + offsetX,
-          start.y * scaleUp + offsetY,
-          end.x * scaleUp + offsetX,
-          end.y * scaleUp + offsetY
-        );
-        const direction = new Phaser.Math.Vector2(
-          end.x - start.x,
-          end.y - start.y
-        ).normalize();
-
-        const angle = Phaser.Math.Angle.Between(
-          start.x * scaleUp + offsetX,
-          start.y * scaleUp + offsetY,
-          end.x * scaleUp + offsetX,
-          end.y * scaleUp + offsetY
-        );
-
-        let currentDistance = 0;
-        while (currentDistance < distance) {
-          dots.push({
-            x: start.x * scaleUp + direction.x * currentDistance + offsetX,
-            y: start.y * scaleUp + direction.y * currentDistance + offsetY,
-            angle: angle, // Save the angle for the arrow
-          });
-          currentDistance += dotSpacing;
-        }
-      }
-    });
-
-    // Debug: Log computed dots
-    // Step 1: Draw the faint line for the entire path
-    this.letterGraphics[this.currentChunkIndex].lineStyle(2, 0x000000, 0.2); // Black line with 20% opacity
-    this.letterGraphics[this.currentChunkIndex].beginPath();
-    path.forEach((point, index) => {
-      if (index === 0) {
-        this.letterGraphics[this.currentChunkIndex].moveTo(
-          point.x * scaleUp + offsetX,
-          point.y * scaleUp + offsetY
-        );
-      } else {
-        this.letterGraphics[this.currentChunkIndex].lineTo(
-          point.x * scaleUp + offsetX,
-          point.y * scaleUp + offsetY
-        );
-      }
-    });
-    this.letterGraphics[this.currentChunkIndex].strokePath();
-
-    // Step 2: Animate dots and hand along the path
-    let dotIndex = 0;
-    const interval = setInterval(() => {
-      if (dotIndex >= dots.length) {
-        clearInterval(interval);
-
-        // Draw the final arrow with an image
-        const arrowEnd = dots[dots.length - 1];
-        this.add
-          .image(arrowEnd.x, arrowEnd.y, 'arrow')
-          .setOrigin(0.5, 0.5)
-          .setScale(arrowScale)
-          .setRotation(arrowEnd.angle + Math.PI / 2); // Adjust rotation for arrow direction
-
-
-        hand.destroy();
-        return;
-      }
-
-      const dot = dots[dotIndex];
-      this.letterGraphics[this.currentChunkIndex].fillStyle(0xff0000, 1); // Red color for dots
-      this.letterGraphics[this.currentChunkIndex].fillCircle(dot.x, dot.y, dotRadius);
-
-      // Place arrow images at regular intervals
-      if (dotIndex % Math.floor(dotSpacing * 2 / dotRadius) === 0) {
-        const arrow = this.add
-          .image(dot.x, dot.y, 'arrow')
-          .setOrigin(0.5, 0.5)
-          .setScale(arrowScale)
-          .setRotation(dot.angle + Math.PI / 2); // Adjust rotation for arrow direction
-
-      }
-
-      // Move the hand
-      hand.setPosition(Math.round(dot.x), Math.round(dot.y));
-      hand.setVisible(true);
-
-      dotIndex++;
-    }, duration / dots.length);
-  }
-
-
   // MARK: animateChunk
   private animateChunk(
     chunk: { x: number; y: number }[],
@@ -441,19 +319,18 @@ export class TracingGameScene extends Phaser.Scene {
       const arrowScale = 0.05; // Scale for the arrow image
       const dots: { x: number; y: number; angle?: number }[] = [];
       let arrow: Phaser.GameObjects.Image;
-      // Initialize letterGraphics if it does not exist
-      // if (!this.letterGraphics[this.currentChunkIndex]) {
-        this.letterGraphics[this.currentChunkIndex] = this.add.graphics();
 
+      // Initialize letterGraphics if it does not exist
+      if (!this.letterGraphics[this.currentChunkIndex]) {
+        this.letterGraphics[this.currentChunkIndex] = this.add.graphics();
         this.chunkElements.push(this.letterGraphics[this.currentChunkIndex]);
-        // change the chunk depth if the chunk index is greater than 0
+
+        // Change the chunk depth if the chunk index is greater than 0
         if (this.currentChunkIndex > 0) {
           this.letterGraphics[this.currentChunkIndex].setDepth(this.handDepth);
-
-          // Update the hand depth
           this.handDepth += this.currentChunkIndex * 3 + 1;
         }
-      // }
+      }
 
       // Clear any existing interval
       if (this.animationInterval) {
@@ -468,154 +345,187 @@ export class TracingGameScene extends Phaser.Scene {
         .setVisible(false)
         .setDepth(this.handDepth);
 
-
       // Precompute dots for the entire chunk (single path)
-      chunk.forEach((point, index) => {
-        if (index < chunk.length - 1) {
-          const start = chunk[index];
-          const end = chunk[index + 1];
+      this.precomputeDots(chunk, scaleUp, offsetX, offsetY, dots, dotSpacing);
 
-          const distance = Phaser.Math.Distance.Between(
-            start.x * scaleUp + offsetX,
-            start.y * scaleUp + offsetY,
-            end.x * scaleUp + offsetX,
-            end.y * scaleUp + offsetY
-          );
+      // Step 1: Draw the faint line for the entire path
+      this.drawPath(chunk, scaleUp, offsetX, offsetY);
 
-          const direction = new Phaser.Math.Vector2(
-            end.x - start.x,
-            end.y - start.y
-          ).normalize();
+      this.animateDotsAndArrows(dots, dotRadius, dashSpacing, duration, arrowScale, hand, resolve);
 
-          // Adjust the angle to ensure the arrow points up
-          const angle = Phaser.Math.Angle.Between(
-            start.x * scaleUp + offsetX,
-            start.y * scaleUp + offsetY,
-            end.x * scaleUp + offsetX,
-            end.y * scaleUp + offsetY
-          );
-
-          let currentDistance = 0;
-          while (currentDistance < distance) {
-            dots.push({
-              x: start.x * scaleUp + direction.x * currentDistance + offsetX,
-              y: start.y * scaleUp + direction.y * currentDistance + offsetY,
-              angle: angle, // Save the angle for the arrow
-            });
-            currentDistance += dotSpacing;
-          }
-
-          
-        }
-        console.log('dots', dots[dots.length - 1]);
-      });
-      // Step 1: Draw a faint line for the path
-      this.letterGraphics[this.currentChunkIndex].lineStyle(20, this.currentChunkColor, 1); // Black line with 50% opacity
-
-      // change the chunk depth if the chunk index is greater than 0
-      if (this.currentChunkIndex > 0) {
-        this.letterGraphics[this.currentChunkIndex].setDepth(this.handDepth);
-      }
-
-      this.letterGraphics[this.currentChunkIndex].beginPath();
-      chunk.forEach((point, index) => {
-        if (index === 0) {
-          this.letterGraphics[this.currentChunkIndex].moveTo(
-            point.x * scaleUp + offsetX,
-            point.y * scaleUp + offsetY
-          );
-        } else {
-          this.letterGraphics[this.currentChunkIndex].lineTo(
-            point.x * scaleUp + offsetX,
-            point.y * scaleUp + offsetY
-          );
-        }
-
-        // Pushing the path to the current chunk
-        this.currentChunk.push({ x: point.x * scaleUp + offsetX, y: point.y * scaleUp + offsetY });
-      });
-
-      this.letterGraphics[this.currentChunkIndex].strokePath();
-
-            // Step 2: Animate dots, hand, and arrows along the path
-      let dotIndex = 0;
-      const totalDots = dots.length;
-      const dotDuration = duration / totalDots;
-      
-      // Store the interval ID
-      this.animationInterval = setInterval(() => {
-          if (dotIndex >= dots.length) {
-              clearInterval(this.animationInterval!);
-              hand.destroy(); // Remove the hand after animation
-      
-              // Draw the final arrow at the end of the path
-              const finalDot = dots[dots.length - 1];
-              if (finalDot.angle !== undefined) {
-                  // Adjust the angle to ensure the arrow points in the correct direction
-                  const adjustedAngle = finalDot.angle - Math.PI / 2;
-                  console.log('dot angle', finalDot.angle, adjustedAngle);
-      
-                  // arrow = this.add
-                  //     .image(finalDot.x, finalDot.y, 'arrow')
-                  //     .setOrigin(0.5, 0.5)
-                  //     .setScale(arrowScale)
-                  //     .setTintFill(this.arrowColor)
-                  //     .setTint(this.arrowColor)
-                  //     .setRotation(Math.abs(adjustedAngle)) // Adjust rotation for arrow direction
-                  //     .setDepth(this.handDepth); // Ensure arrow is above the hand
-      
-                  // this.chunkElements.push(arrow);
-              }
-      
-              resolve(); // Signal animation completion
-              return;
-          }
-      
-          const dot = dots[dotIndex];
-      
-          // Draw the starting dot
-          if (dotIndex === 0) {
-              this.letterGraphics[this.currentChunkIndex].fillStyle(this.firstDotColor, 1); // Green color for the starting dot
-              this.letterGraphics[this.currentChunkIndex].fillCircle(dot.x, dot.y, dotRadius);
-          } else if (dotIndex === dots.length - 1) {
-              // Draw the final arrow at the end of the path
-      
-              console.log('dot angle', dot.angle, (dot.angle ?? 0) - Math.PI / 2);
-              
-              if (dot.angle !== undefined) {
-                  // Adjust the angle to ensure the arrow points in the correct direction
-                  const adjustedAngle = dot.angle - Math.PI / 2;
-                  arrow = this.add
-                      .image(dot.x, dot.y, 'arrow')
-                      .setOrigin(0.5, 0.5)
-                      .setScale(arrowScale)
-                      .setTintFill(this.arrowColor)
-                      .setTint(this.arrowColor)
-                      .setRotation(adjustedAngle) // Adjust rotation for arrow direction
-                      .setDepth(this.handDepth); // Ensure arrow is above the hand
-      
-                  this.chunkElements.push(arrow);
-              }
-          } else {
-              // Draw dashes at regular intervals
-              if (dotIndex % Math.floor(dashSpacing / dotSpacing + 1) === 0) {
-                  const nextDot = dots[dotIndex + 2]; // Skip one dot to create space between dashes
-                  if (nextDot && dotIndex < dots.length - 4) { // Check if nextDot exists
-                      this.letterGraphics[this.currentChunkIndex].fillStyle(this.dotsColor, 1); // Red color for dashes
-                      this.letterGraphics[this.currentChunkIndex].fillCircle(dot.x, dot.y, dotRadius);
-                  }
-              }
-          }
-      
-          // Move the hand
-          hand.setPosition(Math.round(dot.x), Math.round(dot.y));
-          hand.setVisible(true);
-      
-          dotIndex++;
-      }, dotDuration);
     });
   }
 
+  private precomputeDots(
+    chunk: { x: number; y: number }[],
+    scaleUp: number,
+    offsetX: number,
+    offsetY: number,
+    dots: { x: number; y: number; angle?: number }[],
+    dotSpacing: number
+  ): void {
+    chunk.forEach((point, index) => {
+      if (index < chunk.length - 1) {
+        const start = chunk[index];
+        const end = chunk[index + 1];
+
+        console.log('start', start);
+        console.log('end', end);
+        
+        const distance = Phaser.Math.Distance.Between(
+          start.x * scaleUp + offsetX,
+          start.y * scaleUp + offsetY,
+          end.x * scaleUp + offsetX,
+          end.y * scaleUp + offsetY
+        );
+
+        const direction = new Phaser.Math.Vector2(
+          end.x - start.x,
+          end.y - start.y
+        ).normalize();
+
+        console.log('direction', direction);
+        
+
+        // Adjust the angle to ensure the arrow points up
+        const angle = Phaser.Math.Angle.Between(
+          start.x * scaleUp + offsetX,
+          start.y * scaleUp + offsetY,
+          end.x * scaleUp + offsetX,
+          end.y * scaleUp + offsetY
+        );
+        
+
+        let currentDistance = 0;
+        while (currentDistance < distance) {
+          dots.push({
+            x: start.x * scaleUp + direction.x * currentDistance + offsetX,
+            y: start.y * scaleUp + direction.y * currentDistance + offsetY,
+            angle: angle, // Save the angle for the arrow
+          });
+          currentDistance += dotSpacing;
+        }
+      }
+    });
+  }
+
+  private drawPath(
+    chunk: { x: number; y: number }[],
+    scaleUp: number,
+    offsetX: number,
+    offsetY: number
+  ): void {
+    // Step 1: Draw a faint line for the path
+    this.letterGraphics[this.currentChunkIndex].lineStyle(20, this.currentChunkColor, 1); // Black line with 50% opacity
+
+    // Change the chunk depth if the chunk index is greater than 0
+    if (this.currentChunkIndex > 0) {
+      this.letterGraphics[this.currentChunkIndex].setDepth(this.handDepth);
+    }
+
+    this.letterGraphics[this.currentChunkIndex].beginPath();
+    chunk.forEach((point, index) => {
+      if (index === 0) {
+        this.letterGraphics[this.currentChunkIndex].moveTo(
+          point.x * scaleUp + offsetX,
+          point.y * scaleUp + offsetY
+        );
+      } else {
+        this.letterGraphics[this.currentChunkIndex].lineTo(
+          point.x * scaleUp + offsetX,
+          point.y * scaleUp + offsetY
+        );
+      }
+
+      // Pushing the path to the current chunk
+      this.currentChunk.push({ x: point.x * scaleUp + offsetX, y: point.y * scaleUp + offsetY });
+    });
+
+    this.letterGraphics[this.currentChunkIndex].strokePath();
+  }
+
+  private animateDotsAndArrows(
+    dots: { x: number; y: number; angle?: number }[],
+    dotRadius: number,
+    dashSpacing: number,
+    duration: number,
+    arrowScale: number,
+    hand: Phaser.GameObjects.Sprite,
+    resolve: () => void
+  ): void {
+    let dotIndex = 0;
+    const totalDots = dots.length;
+    const dotDuration = duration / totalDots;
+
+    // Store the interval ID
+    this.animationInterval = setInterval(() => {
+      if (dotIndex >= dots.length) {
+        clearInterval(this.animationInterval!);
+        hand.destroy(); // Remove the hand after animation
+
+        // Draw the final arrow at the end of the path
+        // const finalDot = dots[dots.length - 1];
+        // const secondLastDot = dots[dots.length - 2];
+        // if (finalDot.angle !== undefined && secondLastDot.angle !== undefined) {
+        resolve(); // Signal animation completion
+        return;
+      }
+
+      const dot = dots[dotIndex];
+
+      // Draw the starting dot
+      if (dotIndex === 0) {
+        this.letterGraphics[this.currentChunkIndex].fillStyle(this.firstDotColor, 1); // Green color for the starting dot
+        this.letterGraphics[this.currentChunkIndex].fillCircle(dot.x, dot.y, dotRadius);
+      } else if (dotIndex === dots.length - 1) {
+        // Draw the final arrow at the end of the path
+
+        console.log('angle', Phaser.Math.RadToDeg(dot.angle ?? 0));
+        if (dot.angle !== undefined) {
+          // Calculate the angle using the last segment
+          const adjustedAngle = Phaser.Math.Angle.Between(
+            dots[dotIndex - 1].x,
+            dots[dotIndex - 1].y,
+            dot.x,
+            dot.y
+          ) - Math.PI / 2; // Adjust the angle to point up
+
+          console.log();
+          
+          console.log('angle', Phaser.Math.RadToDeg(dot.angle ?? 0));
+          // Use the single arrow image and rotate it
+          const arrow = this.add
+            .image(dot.x, dot.y, 'arrow')
+            .setOrigin(0.5, 0.5)
+            .setScale(arrowScale)
+            .setRotation(adjustedAngle) // Rotate the arrow based on the angle
+            .setDepth(this.handDepth); // Ensure arrow is above the hand
+
+            // CHECK IF IT'S LAST CHUNK
+            if (this.currentChunkIndex === this.letterData.paths[this.currentLetterIndex].length - 1) {
+              arrow.setFlipY(true);
+            }
+
+          this.chunkElements.push(arrow);
+        }
+      } else {
+        // Draw dashes at regular intervals
+        if (dotIndex % Math.floor(dashSpacing / dashSpacing + 1) === 0) {
+          const nextDot = dots[dotIndex + 2]; // Skip one dot to create space between dashes
+          if (nextDot && dotIndex < dots.length - 4) { // Check if nextDot exists
+            this.letterGraphics[this.currentChunkIndex].fillStyle(this.dotsColor, 1); // Red color for dashes
+            this.letterGraphics[this.currentChunkIndex].fillCircle(dot.x, dot.y, dotRadius);
+          }
+        }
+      }
+
+      // Move the hand
+      hand.setPosition(Math.round(dot.x), Math.round(dot.y));
+      hand.setVisible(true);
+
+      dotIndex++;
+    }, dotDuration);
+  }
 
   // MARK: waitForChildToDraw
   private waitForChildToDraw(
@@ -888,13 +798,13 @@ export class TracingGameScene extends Phaser.Scene {
 
       // CHange the depth of the graphics according to the chunk index
       graphics.setDepth(this.handDepth + 1);
-      
+
       // Redraw with new color
       graphics.fillStyle(color, 1); // Fill color with some transparency
       graphics.lineStyle(2, color, 1); // Border color
-      
 
-      
+
+
       graphics.beginPath();
       graphics.moveTo(corners[0].x, corners[0].y);
       corners.slice(1).forEach(p => graphics.lineTo(p.x, p.y));
@@ -1064,5 +974,41 @@ export class TracingGameScene extends Phaser.Scene {
       boundingBox.minY * scaleUp;
 
     return { offsetX, offsetY };
+  }
+
+  private createArrowSVG(angle: number): string {
+    const svg = `
+          <?xml version="1.0" encoding="utf-8"?>
+          <svg width="24" height="24" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+            <path d="M12 5V19M12 5L6 11M12 5L18 11" stroke="#fff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" transform="rotate(${angle} 12 12)"/>
+          </svg>
+      `;
+    return svg;
+  }
+
+  private svgToTexture(scene: Phaser.Scene, svg: string, textureKey: string): void {
+    const svgBlob = new Blob([svg], { type: 'image/svg+xml;charset=utf-8' });
+    const url = URL.createObjectURL(svgBlob);
+    const img = new Image();
+    img.onload = () => {
+      scene.textures.addImage(textureKey, img);
+      URL.revokeObjectURL(url);
+    };
+    img.src = url;
+  }
+
+  private getArrowDirection(angle: number): string {
+    const degrees = Phaser.Math.RadToDeg(angle);
+    console.log('arrow angle', degrees);
+
+    if (degrees >= -45 && degrees < 45) {
+      return 'arrow-right';
+    } else if (degrees >= 45 && degrees < 135) {
+      return 'arrow-down';
+    } else if (degrees >= -135 && degrees < -45) {
+      return 'arrow-up';
+    } else {
+      return 'arrow-left';
+    }
   }
 }
