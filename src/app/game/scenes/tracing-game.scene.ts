@@ -1,4 +1,5 @@
 import { OnInit } from "@angular/core";
+import { getTransformedChunk } from "../utils/tracing-game.utils";
 
 interface Letter {
   paths: { x: number; y: number }[][];
@@ -69,7 +70,10 @@ export class TracingGameScene extends Phaser.Scene {
   private dotsColor: number = 0xffffff; // Red for the dots
 
   // CHUNKS
+  // This array stores the elements for each chunk
   private chunkElements: (Phaser.GameObjects.Graphics | Phaser.GameObjects.Image)[] = [];
+  // This array stores the elements for each chunk in the initial animation for the full letter
+  private initialAnimationElements: (Phaser.GameObjects.Graphics | Phaser.GameObjects.Image)[] = [];
 
   private completedChunks: Set<number> = new Set(); // Stores indices of completed chunks
   private segmentDrawSuccessRate: number = 95; // Minimum completion rate to move to the next chunk
@@ -80,6 +84,9 @@ export class TracingGameScene extends Phaser.Scene {
   private readonly chunkFinishedDepth = 1;
   private readonly chunkUnfinishedDepth = 1;
   private readonly letterDepth = 1;
+
+  private drawingTimeout: any;
+
   constructor() {
     super({ key: 'TracingGameScene' });
   }
@@ -252,8 +259,6 @@ export class TracingGameScene extends Phaser.Scene {
     this.offsetY = offsets.offsetY;
 
     // Step 2: Clear previous segments
-    console.log(paths);
-
     // this.segmentVisuals[this.currentChunkIndex].forEach(g => g.destroy());
     this.segmentVisuals[this.currentChunkIndex] = [];
 
@@ -272,28 +277,41 @@ export class TracingGameScene extends Phaser.Scene {
       return;
     }
 
-    // Step 6: Get current chunk data
-    const currentChunk = paths[this.currentLetterIndex][this.currentChunkIndex];
-    console.log('Current Chunk:', currentChunk);
-
-    // Step 7: Transform chunk coordinates
-    const transformedChunk = currentChunk.map(point => ({
-      x: point.x * this.scaleUp + this.offsetX,
-      y: point.y * this.scaleUp + this.offsetY
-    }));
+    // Step 6: Get and transform current chunk data
+    const transformedChunk = getTransformedChunk(
+      paths,
+      this.currentLetterIndex,
+      this.currentChunkIndex,
+      this.scaleUp,
+      this.offsetX,
+      this.offsetY
+    );
 
     // Step 8: Initialize segments
-    this.segments[this.currentChunkIndex] = this.dividePathIntoSegments(transformedChunk);
+    // this.segments[this.currentChunkIndex] = this.dividePathIntoSegments(transformedChunk);
     this.currentChunk = transformedChunk;
 
     // Step 9: Animate and handle drawing
-    this.animateAndWaitForChunk(currentChunk, this.scaleUp, this.offsetX, this.offsetY).then(() => {
-      this.isAnimating = false;
-      console.log('Ready for drawing the current chunk');
-    });
+    this.animateFullLetter(this.letterData.paths[this.currentLetterIndex], this.scaleUp, this.offsetX, this.offsetY)
+      .then(() => {
+        // After the full letter animation is complete, reset the initial animation elements
+        // this.initialAnimationElements.forEach(element => element.destroy());
+        console.log('Initial animation complete');
+        console.log('Current Chunk Index:', this.currentChunkIndex);
 
-    // console.log('test counter', testCounter++);
+        if (!this.letterGraphics[this.currentChunkIndex]) {
+          this.letterGraphics[this.currentChunkIndex] = this.add.graphics();
+        }
+        this.drawFaintLetterPaths(paths, this.offsetX, this.offsetY);
 
+        // and then draw the first chunk
+        return this.animateChunk(this.letterData.paths[this.currentLetterIndex][0], this.scaleUp, this.offsetX, this.offsetY);
+      })
+      .then(() => {
+        // Start the drawing timeout
+        this.startDrawingTimeout();
+        console.log('First chunk animation complete');
+      });
   }
 
   private onLetterCompleted(): void {
@@ -305,55 +323,116 @@ export class TracingGameScene extends Phaser.Scene {
   }
 
   // MARK: animateChunk
-  private animateChunk(
+  private async animateChunk(
     chunk: { x: number; y: number }[],
     scaleUp: number,
     offsetX: number,
     offsetY: number
   ): Promise<void> {
-    return new Promise((resolve) => {
-      const dotRadius = 3; // Radius of each dot
-      const dotSpacing = 10; // Spacing between each dot
-      const dashSpacing = 10; // Spacing between dashes
-      const duration = 2000; // Total duration for the chunk animation
-      const arrowScale = 0.05; // Scale for the arrow image
-      const dots: { x: number; y: number; angle?: number }[] = [];
-      let arrow: Phaser.GameObjects.Image;
+    const dotRadius = 3; // Radius of each dot
+    const dotSpacing = 10; // Spacing between each dot
+    const dashSpacing = 10; // Spacing between dashes
+    const duration = 2000; // Total duration for the chunk animation
+    const arrowScale = 0.05; // Scale for the arrow image
 
-      // Initialize letterGraphics if it does not exist
-      if (!this.letterGraphics[this.currentChunkIndex]) {
-        this.letterGraphics[this.currentChunkIndex] = this.add.graphics();
-        this.chunkElements.push(this.letterGraphics[this.currentChunkIndex]);
+    // Step 6: Get and transform current chunk data
+    const transformedChunk = getTransformedChunk(
+      this.letterData.paths,
+      this.currentLetterIndex,
+      this.currentChunkIndex,
+      this.scaleUp,
+      this.offsetX,
+      this.offsetY
+    );
 
-        // Change the chunk depth if the chunk index is greater than 0
-        if (this.currentChunkIndex > 0) {
-          this.letterGraphics[this.currentChunkIndex].setDepth(this.handDepth);
-          this.handDepth += this.currentChunkIndex * 3 + 1;
-        }
+
+    // Step 8: Initialize segments
+    this.segments[this.currentChunkIndex] = this.dividePathIntoSegments(transformedChunk);
+
+    // Initialize letterGraphics if it does not exist
+    if (!this.letterGraphics[this.currentChunkIndex]) {
+      this.letterGraphics[this.currentChunkIndex] = this.add.graphics();
+      this.chunkElements.push(this.letterGraphics[this.currentChunkIndex]);
+
+      // Change the chunk depth if the chunk index is greater than 0
+      if (this.currentChunkIndex > 0) {
+        this.letterGraphics[this.currentChunkIndex].setDepth(this.handDepth + 1);
+        this.handDepth += this.currentChunkIndex * 3 + 1;
       }
+    }
 
-      // Clear any existing interval
-      if (this.animationInterval) {
-        clearInterval(this.animationInterval);
-      }
+    // Clear any existing interval
+    if (this.animationInterval) {
+      clearInterval(this.animationInterval);
+    }
 
-      // Add a hand sprite to guide the drawing
-      const hand = this.add
-        .sprite(0, 0, 'hand')
-        .setOrigin(0.3, 0.2)
-        .setScale(0.05)
-        .setVisible(false)
-        .setDepth(this.handDepth);
+    // Add a hand sprite to guide the drawing
+    const hand = this.add
+      .sprite(0, 0, 'hand')
+      .setOrigin(0.3, 0.2)
+      .setScale(0.05)
+      .setVisible(false)
+      .setDepth(this.handDepth);
 
-      // Precompute dots for the entire chunk (single path)
-      this.precomputeDots(chunk, scaleUp, offsetX, offsetY, dots, dotSpacing);
+    console.log(this.handDepth);
 
-      // Step 1: Draw the faint line for the entire path
-      this.drawPath(chunk, scaleUp, offsetX, offsetY);
 
-      this.animateDotsAndArrows(dots, dotRadius, dashSpacing, duration, arrowScale, hand, resolve);
+    // Precompute dots for the entire chunk (single path)
+    const dots = this.precomputeDots(chunk, scaleUp, offsetX, offsetY, dotSpacing);
 
+    // Step 1: Draw the faint line for the chunk
+    this.drawPath(this.letterGraphics[this.currentChunkIndex], [chunk], scaleUp, offsetX, offsetY);
+
+    await this.animateDotsAndArrows(dots, dotRadius, dashSpacing, duration, arrowScale, hand);
+  }
+
+  private async animateFullLetter(
+    letterData: { x: number; y: number }[][],
+    scaleUp: number,
+    offsetX: number,
+    offsetY: number
+  ): Promise<void> {
+    const allDots: { x: number; y: number; angle?: number }[] = [];
+    const dotSpacing = 10; // Spacing between each dot
+
+    // Precompute dots for the entire letter (all chunks)
+    letterData.forEach(chunk => {
+      const chunkDots = this.precomputeDots(chunk, scaleUp, offsetX, offsetY, dotSpacing);
+      allDots.push(...chunkDots);
     });
+
+    if (!this.letterGraphics[this.currentChunkIndex]) {
+      this.letterGraphics[this.currentChunkIndex] = this.add.graphics();
+      this.chunkElements.push(this.letterGraphics[this.currentChunkIndex]);
+    }
+
+    // Step 1: Draw the faint line for the entire letter
+    this.drawPath(this.letterGraphics[this.currentChunkIndex], letterData, scaleUp, offsetX, offsetY);
+
+    // Add a hand sprite to guide the drawing
+    const hand = this.add
+      .sprite(0, 0, 'hand')
+      .setOrigin(0.3, 0.2)
+      .setScale(0.05)
+      .setVisible(false)
+      .setDepth(this.handDepth);
+
+    // Step 2: Animate dots and arrows for the entire letter
+    await this.animateDotsAndArrows(allDots, 3, 10, 5000, 0.05, hand);
+
+    // sleep for 1 second
+    await new Promise(resolve => setTimeout(resolve, 2000));
+
+    // Clear graphics and remove dots and arrows after animation is complete
+    this.clearGraphics();
+  }
+
+  private clearGraphics(): void {
+    this.letterGraphics.forEach(graphic => graphic.clear());
+    this.chunkElements.forEach(element => element.destroy());
+    this.letterGraphics = [];
+    this.chunkElements = [];
+    this.handDepth = 1;
   }
 
   private precomputeDots(
@@ -361,17 +440,14 @@ export class TracingGameScene extends Phaser.Scene {
     scaleUp: number,
     offsetX: number,
     offsetY: number,
-    dots: { x: number; y: number; angle?: number }[],
     dotSpacing: number
-  ): void {
+  ): { x: number; y: number; angle?: number }[] {
+    const dots: { x: number; y: number; angle?: number }[] = [];
     chunk.forEach((point, index) => {
       if (index < chunk.length - 1) {
         const start = chunk[index];
         const end = chunk[index + 1];
 
-        console.log('start', start);
-        console.log('end', end);
-        
         const distance = Phaser.Math.Distance.Between(
           start.x * scaleUp + offsetX,
           start.y * scaleUp + offsetY,
@@ -384,17 +460,12 @@ export class TracingGameScene extends Phaser.Scene {
           end.y - start.y
         ).normalize();
 
-        console.log('direction', direction);
-        
-
-        // Adjust the angle to ensure the arrow points up
         const angle = Phaser.Math.Angle.Between(
           start.x * scaleUp + offsetX,
           start.y * scaleUp + offsetY,
           end.x * scaleUp + offsetX,
           end.y * scaleUp + offsetY
         );
-        
 
         let currentDistance = 0;
         while (currentDistance < distance) {
@@ -407,41 +478,38 @@ export class TracingGameScene extends Phaser.Scene {
         }
       }
     });
+    return dots;
   }
 
   private drawPath(
-    chunk: { x: number; y: number }[],
+    graphics: Phaser.GameObjects.Graphics,
+    chunks: { x: number; y: number }[][],
     scaleUp: number,
     offsetX: number,
-    offsetY: number
-  ): void {
-    // Step 1: Draw a faint line for the path
-    this.letterGraphics[this.currentChunkIndex].lineStyle(20, this.currentChunkColor, 1); // Black line with 50% opacity
+    offsetY: number,
+    color: number = this.currentChunkColor
+  ): Phaser.GameObjects.Graphics {
+    graphics.lineStyle(20, color, 1); // Black line with 50% opacity
 
-    // Change the chunk depth if the chunk index is greater than 0
-    if (this.currentChunkIndex > 0) {
-      this.letterGraphics[this.currentChunkIndex].setDepth(this.handDepth);
-    }
-
-    this.letterGraphics[this.currentChunkIndex].beginPath();
-    chunk.forEach((point, index) => {
-      if (index === 0) {
-        this.letterGraphics[this.currentChunkIndex].moveTo(
-          point.x * scaleUp + offsetX,
-          point.y * scaleUp + offsetY
-        );
-      } else {
-        this.letterGraphics[this.currentChunkIndex].lineTo(
-          point.x * scaleUp + offsetX,
-          point.y * scaleUp + offsetY
-        );
-      }
-
-      // Pushing the path to the current chunk
-      this.currentChunk.push({ x: point.x * scaleUp + offsetX, y: point.y * scaleUp + offsetY });
+    chunks.forEach(chunk => {
+      graphics.beginPath();
+      chunk.forEach((point, index) => {
+        if (index === 0) {
+          graphics.moveTo(
+            point.x * scaleUp + offsetX,
+            point.y * scaleUp + offsetY
+          );
+        } else {
+          graphics.lineTo(
+            point.x * scaleUp + offsetX,
+            point.y * scaleUp + offsetY
+          );
+        }
+      });
+      graphics.strokePath();
     });
 
-    this.letterGraphics[this.currentChunkIndex].strokePath();
+    return graphics;
   }
 
   private animateDotsAndArrows(
@@ -450,81 +518,69 @@ export class TracingGameScene extends Phaser.Scene {
     dashSpacing: number,
     duration: number,
     arrowScale: number,
-    hand: Phaser.GameObjects.Sprite,
-    resolve: () => void
-  ): void {
-    let dotIndex = 0;
-    const totalDots = dots.length;
-    const dotDuration = duration / totalDots;
+    hand: Phaser.GameObjects.Sprite
+  ): Promise<void> {
+    return new Promise((resolve) => {
+      let dotIndex = 0;
+      const totalDots = dots.length;
+      const dotDuration = duration / totalDots;
 
-    // Store the interval ID
-    this.animationInterval = setInterval(() => {
-      if (dotIndex >= dots.length) {
-        clearInterval(this.animationInterval!);
-        hand.destroy(); // Remove the hand after animation
+      this.animationInterval = setInterval(() => {
+        if (dotIndex >= dots.length) {
+          clearInterval(this.animationInterval!);
+          hand.destroy(); // Remove the hand after animation
 
-        // Draw the final arrow at the end of the path
-        // const finalDot = dots[dots.length - 1];
-        // const secondLastDot = dots[dots.length - 2];
-        // if (finalDot.angle !== undefined && secondLastDot.angle !== undefined) {
-        resolve(); // Signal animation completion
-        return;
-      }
+          // Draw the final arrow at the end of the path
+          const finalDot = dots[dots.length - 1];
+          if (finalDot.angle !== undefined) {
+            const adjustedAngle = finalDot.angle - Math.PI / 2; // Adjust the angle to point up
+            const arrow = this.add
+              .image(finalDot.x, finalDot.y, 'arrow')
+              .setOrigin(0.5, 0.5)
+              .setScale(arrowScale)
+              .setRotation(adjustedAngle) // Rotate the arrow based on the angle
+              .setDepth(this.handDepth); // Ensure arrow is above the hand
 
-      const dot = dots[dotIndex];
+            this.chunkElements.push(arrow);
+          }
 
-      // Draw the starting dot
-      if (dotIndex === 0) {
-        this.letterGraphics[this.currentChunkIndex].fillStyle(this.firstDotColor, 1); // Green color for the starting dot
-        this.letterGraphics[this.currentChunkIndex].fillCircle(dot.x, dot.y, dotRadius);
-      } else if (dotIndex === dots.length - 1) {
-        // Draw the final arrow at the end of the path
-
-        console.log('angle', Phaser.Math.RadToDeg(dot.angle ?? 0));
-        if (dot.angle !== undefined) {
-          // Calculate the angle using the last segment
-          const adjustedAngle = Phaser.Math.Angle.Between(
-            dots[dotIndex - 1].x,
-            dots[dotIndex - 1].y,
-            dot.x,
-            dot.y
-          ) - Math.PI / 2; // Adjust the angle to point up
-
-          console.log();
-          
-          console.log('angle', Phaser.Math.RadToDeg(dot.angle ?? 0));
-          // Use the single arrow image and rotate it
-          const arrow = this.add
-            .image(dot.x, dot.y, 'arrow')
-            .setOrigin(0.5, 0.5)
-            .setScale(arrowScale)
-            .setRotation(adjustedAngle) // Rotate the arrow based on the angle
-            .setDepth(this.handDepth); // Ensure arrow is above the hand
-
-            // CHECK IF IT'S LAST CHUNK
-            if (this.currentChunkIndex === this.letterData.paths[this.currentLetterIndex].length - 1) {
-              arrow.setFlipY(true);
-            }
-
-          this.chunkElements.push(arrow);
+          resolve(); // Signal animation completion
+          return;
         }
-      } else {
-        // Draw dashes at regular intervals
-        if (dotIndex % Math.floor(dashSpacing / dashSpacing + 1) === 0) {
-          const nextDot = dots[dotIndex + 2]; // Skip one dot to create space between dashes
-          if (nextDot && dotIndex < dots.length - 4) { // Check if nextDot exists
-            this.letterGraphics[this.currentChunkIndex].fillStyle(this.dotsColor, 1); // Red color for dashes
-            this.letterGraphics[this.currentChunkIndex].fillCircle(dot.x, dot.y, dotRadius);
+
+        const dot = dots[dotIndex];
+
+        if (dotIndex === 0) {
+          this.letterGraphics[this.currentChunkIndex].fillStyle(this.firstDotColor, 1); // Green color for the starting dot
+          this.letterGraphics[this.currentChunkIndex].fillCircle(dot.x, dot.y, dotRadius);
+        } else if (dotIndex === dots.length - 1) {
+          if (dot.angle !== undefined) {
+            const adjustedAngle = dot.angle - Math.PI / 2; // Adjust the angle to point up
+            const arrow = this.add
+              .image(dot.x, dot.y, 'arrow')
+              .setOrigin(0.5, 0.5)
+              .setScale(arrowScale)
+              .setRotation(adjustedAngle) // Rotate the arrow based on the angle
+              .setDepth(this.handDepth); // Ensure arrow is above the hand
+
+            this.chunkElements.push(arrow);
+          }
+        } else {
+          if (dotIndex % Math.floor(dashSpacing / dashSpacing + 1) === 0) {
+            const nextDot = dots[dotIndex + 2];
+            if (nextDot && dotIndex < dots.length - 4) {
+              this.letterGraphics[this.currentChunkIndex].fillStyle(this.dotsColor, 1); // Red color for dashes
+              this.letterGraphics[this.currentChunkIndex].fillCircle(dot.x, dot.y, dotRadius);
+            }
           }
         }
-      }
 
-      // Move the hand
-      hand.setPosition(Math.round(dot.x), Math.round(dot.y));
-      hand.setVisible(true);
+        hand.setPosition(Math.round(dot.x), Math.round(dot.y));
+        hand.setVisible(true);
 
-      dotIndex++;
-    }, dotDuration);
+        dotIndex++;
+      }, dotDuration);
+    });
   }
 
   // MARK: waitForChildToDraw
@@ -578,8 +634,40 @@ export class TracingGameScene extends Phaser.Scene {
 
       // Start from the last valid position
       this.drawnPoints.push(this.lastValidPosition);
+
     }
 
+    this.clearDrawingTimeout();
+
+  }
+
+  private startDrawingTimeout(): void {
+    this.clearDrawingTimeout();
+    this.drawingTimeout = setTimeout(() => {
+      this.showPenAndAnimateDots();
+    }, 3000); // 3 seconds of inactivity
+  }
+
+  private clearDrawingTimeout(): void {
+    if (this.drawingTimeout) {
+      clearTimeout(this.drawingTimeout);
+      this.drawingTimeout = null;
+    }
+  }
+
+  private showPenAndAnimateDots(): void {
+    const currentChunk = this.letterData.paths[this.currentLetterIndex][this.currentChunkIndex];
+    const dots = this.precomputeDots(currentChunk, this.scaleUp, this.offsetX, this.offsetY, 10);
+
+    // Add a hand sprite to guide the drawing
+    const hand = this.add
+      .sprite(0, 0, 'hand')
+      .setOrigin(0.3, 0.2)
+      .setScale(0.05)
+      .setVisible(false)
+      .setDepth(this.handDepth);
+
+    this.animateDotsAndArrows(dots, 3, 10, 2000, 0.05, hand);
   }
 
   private continueDrawing(pointer: Phaser.Input.Pointer): void {
@@ -643,34 +731,32 @@ export class TracingGameScene extends Phaser.Scene {
       this.chunkCompleted(this.segments[this.currentChunkIndex]);
       ++this.currentChunkIndex;
       this.segments[this.currentChunkIndex] = []
+      this.segmentVisuals[this.currentChunkIndex] = []
       console.log('Chunk completed. Moving to the next chunk.');
 
       // clear the chunk elements
       this.chunkElements.forEach(element => element.destroy());
 
-      // Draw the next chunk
-      this.drawLetterWithBoundaries(this.letterData.paths, this.letterData.dims);
+      // Draw the next chunk if it exists
+      // Stop if all chunks are completed
+      if (this.currentChunkIndex < this.letterData.paths[this.currentLetterIndex].length) {
+        this.animateChunk(this.letterData.paths[this.currentLetterIndex][this.currentChunkIndex], this.scaleUp, this.offsetX, this.offsetY);
+      } else {
+        this.onLetterCompleted(); // Handle full completion (custom logic)
+        return;
+      }
+
     } else {
       console.log('Chunk not completed. Try again.');
       this.resetCurrentDrawing(); // Optionally reset the current chunk
     }
 
-    // log all data
-    // console.log('drawnPoints ');
-    // console.log(this.drawnPoints);
-    // console.log('segments ');
-    // console.log(this.segments[this.currentChunkIndex]);
-    // console.log('completedChunks ');
-    // console.log(this.completedChunks);
-    // console.log('currentChunkIndex ');
-    // console.log(this.currentChunkIndex);
-    // console.log('currentChunk ');
-    // console.log(this.currentChunk);
-
-
+    // Start the drawing timeout
+    this.startDrawingTimeout();
   }
 
 
+  // MARK: Path Segments
   private dividePathIntoSegments(
     path: { x: number; y: number }[],
     segmentHeight: number = 5,    // Width across the path (thickness)
