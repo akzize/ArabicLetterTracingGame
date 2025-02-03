@@ -200,23 +200,23 @@ export class TracingGameScene extends Phaser.Scene {
     (async () => {
       try {
         // Step 1: Show the full letter filled with animation
-        // await this.showFullLetterFilledWithAnimation();
+        await this.showFullLetterFilledWithAnimation();
         console.log('Initial animation complete');
 
         // Step 2: Play the introduction sound
         console.log('Playing introduction sound');
 
-        // await this.playAudio(this.AUDIO_NAMES.INTRODUCTION);
+        await this.playAudio(this.AUDIO_NAMES.INTRODUCTION);
         console.log('Introduction sound played');
 
-        // await this.delay(this.DELAY_BETWEEN_ANIMATIONS);
+        await this.delay(this.DELAY_BETWEEN_ANIMATIONS);
         console.log('Delay complete');
 
         // Step 3: Play the encouragement sound and start the old process
-        // await this.playAudio(this.AUDIO_NAMES.YOU_CAN_DO_IT);
+        await this.playAudio(this.AUDIO_NAMES.YOU_CAN_DO_IT);
         console.log('Hiding full letter');
 
-        // this.hideFullLetter();
+        this.hideFullLetter();
 
         console.log('Full letter hidden');
         await this.drawLetterWithBoundaries(this.letterData.paths, this.letterData.dims);
@@ -397,16 +397,16 @@ export class TracingGameScene extends Phaser.Scene {
 
     // Step 9: Animate and handle drawing
     try {
-      // await this.animateFullLetter(this.letterData.paths[this.currentLetterIndex], this.scaleUp, this.offsetX, this.offsetY);
+      await this.animateFullLetter(this.letterData.paths[this.currentLetterIndex], this.scaleUp, this.offsetX, this.offsetY);
       // console.log('Initial animation complete');
       // console.log('Current Chunk Index:', this.currentChunkIndex);
 
-      // if (!this.letterGraphics[this.currentChunkIndex]) {
-      //   this.letterGraphics[this.currentChunkIndex] = this.add.graphics();
-      // }
-      // this.drawFaintLetterPaths(paths, this.offsetX, this.offsetY);
+      if (!this.letterGraphics[this.currentChunkIndex]) {
+        this.letterGraphics[this.currentChunkIndex] = this.add.graphics();
+      }
+      this.drawFaintLetterPaths(paths, this.offsetX, this.offsetY);
 
-      // await this.delay(this.DELAY_BETWEEN_ANIMATIONS);
+      await this.delay(this.DELAY_BETWEEN_ANIMATIONS);
 
       await this.playAudio(this.AUDIO_NAMES.FIRST_CHUNK_DRAW);
       await this.animateChunk(this.letterData.paths[this.currentLetterIndex][0], this.scaleUp, this.offsetX, this.offsetY);
