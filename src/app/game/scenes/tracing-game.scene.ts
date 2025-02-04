@@ -131,7 +131,7 @@ export class TracingGameScene extends Phaser.Scene {
       count: 0
     },
     INCOMPLETE_CHUNK: {
-      sounds: [this.AUDIO_NAMES.ALMOST_THERE, this.AUDIO_NAMES.GREAT_EFFORT],
+      sounds: [this.AUDIO_NAMES.GREAT_EFFORT, this.AUDIO_NAMES.TRY_AGAIN],
       count: 0
     }
   };
@@ -195,7 +195,6 @@ export class TracingGameScene extends Phaser.Scene {
     // Setup input and button functionality
     this.setupInputAndButton();
 
-    // this.drawLetter(this.letterData.chunks);
 
     (async () => {
       try {
@@ -883,6 +882,8 @@ export class TracingGameScene extends Phaser.Scene {
     this.drawnPoints.push(point);
   }
 
+
+  // MARK: StopDrawing
   private async stopDrawing(paths: { x: number; y: number }[][][]) {
     this.isDrawing = false;
     console.log('Stopped Drawing');
@@ -932,13 +933,25 @@ export class TracingGameScene extends Phaser.Scene {
         return;
       }
 
+      // 
+      this.CASES_AND_SOUNDS.INCOMPLETE_CHUNK.count = 0;
+
     } else {
       console.log('Chunk not completed. Try again.');
       // Play a sound to encourage the child to try again
-      this.playAudio(this.getSoundToPlay(this.CASES_AND_SOUNDS.INCOMPLETE_CHUNK)).catch((error) => {
-        console.error('Error playing audio:', error);
-      });
-      this.resetCurrentDrawing(); // Optionally reset the current chunk
+      // CHECK IF THE RATE IS MORE THAN 50% 
+      if (completionRate >= 50) {
+        this.playAudio(this.AUDIO_NAMES.ALMOST_THERE).catch((error) => {
+          console.error('Error playing audio:', error);
+        });
+      } else {
+        this.playAudio(this.getSoundToPlay(this.CASES_AND_SOUNDS.INCOMPLETE_CHUNK)).catch((error) => {
+          console.error('Error playing audio:', error);
+        });
+      }
+      
+      // reset the current chunk
+      this.resetCurrentDrawing(); 
     }
 
     // Start the drawing timeout
