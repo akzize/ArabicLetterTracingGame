@@ -1,4 +1,6 @@
 import { OnInit } from "@angular/core";
+import { getTransformedChunk } from "../utils/tracing-game.utils";
+import { Subject } from "rxjs";
 
 interface Letter {
   paths: { x: number; y: number }[][];
@@ -19,9 +21,15 @@ type LetterSegment = {
   completed: boolean; // Indicates if the segment is completed
 };
 
+interface Point {
+  x: number;
+  y: number;
+}
+
 export class TracingGameScene extends Phaser.Scene {
   private letterData!: any; // Holds the loaded letter data
   private letterGraphics: Phaser.GameObjects.Graphics[] = [];
+  private fullLetterGraphics!: Phaser.GameObjects.Graphics;
 
   private childDrawingGraphics!: Phaser.GameObjects.Graphics; // Graphics for the child's drawing
   private isDrawing: boolean = false; // To track if the child is currently drawing
@@ -34,9 +42,11 @@ export class TracingGameScene extends Phaser.Scene {
   private letterMask: any;
 
   private scaleUp: number = 10;
-  private offsetX: number = 0;
-  private offsetY: number = 0;
+  private offsetX: number = 10;
+  private offsetY: number = 10;
+  private readonly tolerance: number = 10; // Allow a margin of error around the segment bounds
 
+  private currentLetterIndex: number = 0; // Stores the index of the current chunk being processed
   private currentChunkIndex: number = 0; // Stores the index of the current chunk being processed
   private currentChunk: { x: number; y: number }[] = [];
 
@@ -68,10 +78,13 @@ export class TracingGameScene extends Phaser.Scene {
   private dotsColor: number = 0xffffff; // Red for the dots
 
   // CHUNKS
+  // This array stores the elements for each chunk
   private chunkElements: (Phaser.GameObjects.Graphics | Phaser.GameObjects.Image)[] = [];
+  // This array stores the elements for each chunk in the initial animation for the full letter
+  private initialAnimationElements: (Phaser.GameObjects.Graphics | Phaser.GameObjects.Image)[] = [];
 
   private completedChunks: Set<number> = new Set(); // Stores indices of completed chunks
-  private segmentDrawSuccessRate: number = 95; // Minimum completion rate to move to the next chunk
+  private segmentDrawSuccessRate: number = 100; // Minimum completion rate to move to the next chunk
 
 
   // OBJECTS DEPTHS
@@ -79,6 +92,60 @@ export class TracingGameScene extends Phaser.Scene {
   private readonly chunkFinishedDepth = 1;
   private readonly chunkUnfinishedDepth = 1;
   private readonly letterDepth = 1;
+
+  private drawingTimeout: any;
+
+  private soundQueue: string[] = [];
+  private isPlayingSound: boolean = false;
+
+  // SOUNDS
+  private readonly AUDIO_NAMES = {
+    INTRODUCTION: 'introduction',
+    WATCH_CLOSE: 'watchClose',
+    YOU_CAN_DO_IT: 'youCanDoIt',
+    N_TRY_IT: 'NTryIt',
+    FIRST_CHUNK_DRAW: 'FirstChunkDraw',
+    FIRST_CHUNK_DRAW_1: 'FirstChunkDraw1',
+    FANTASTIC_MOVE_ON: 'fantasticMoveOn',
+    WELL_DONE: 'wellDone',
+    ALMOST_THERE: 'almostThere',
+    TRY_AGAIN: 'tryAgain',
+    GREAT_EFFORT: 'greatEffort',
+    STAY_ON_PATH: 'stayOnPath',
+    START_AT_BEGINNING: 'startAtBeginning',
+    LETTER_COMPLETE: 'letterComplete',
+    OH_NO: 'ohNo',
+    OOPS: 'Oops',
+    SM_TRY_AGAIN: 'SMTryAgain',
+    VERY_CLOSE: 'veryClose',
+  }
+
+  // Sound cases and sounds
+  private readonly CASES_AND_SOUNDS = {
+    START_WRONG_POSITION: {
+      sounds: [this.AUDIO_NAMES.START_AT_BEGINNING, this.AUDIO_NAMES.OOPS],
+      count: 0
+    },
+    OUTSIDE_BOUNDARY: {
+      sounds: [this.AUDIO_NAMES.TRY_AGAIN, this.AUDIO_NAMES.OOPS],
+      count: 0
+    },
+    INCOMPLETE_CHUNK: {
+      sounds: [this.AUDIO_NAMES.GREAT_EFFORT, this.AUDIO_NAMES.TRY_AGAIN],
+      count: 0
+    }
+  };
+
+  // time between each sound and instruction
+  private readonly DELAY_BETWEEN_ANIMATIONS: number = 2000
+
+  // Drawing Rules tracking
+  private isValidStart: boolean = false;
+  private isOnPath: boolean = false;
+  private canDraw: boolean = true;
+
+
+
   constructor() {
     super({ key: 'TracingGameScene' });
   }
@@ -88,27 +155,75 @@ export class TracingGameScene extends Phaser.Scene {
     // Load the JSON file containing the letter paths
     this.load.json('letters', 'assets/letters.json');
     this.load.image('arrow', 'assets/arrows/arrow-sm-up.svg');
+    this.load.image('arrow-up', 'assets/arrows/arrow-sm-up.svg');
+    this.load.image('arrow-down', 'assets/arrows/arrow-sm-down.svg');
+    this.load.image('arrow-left', 'assets/arrows/arrow-sm-left.svg');
+    this.load.image('arrow-right', 'assets/arrows/arrow-sm-right.svg');
     this.load.image('hand', 'assets/hands/hand.png'); // Replace with your hand image path
+
+    // load sounds
+    this.load.audio('introduction', 'assets/audio/INTRODUCTION.mp3');
+    this.load.audio('watchClose', 'assets/audio/22.mp3');
+    this.load.audio('youCanDoIt', 'assets/audio/33.mp3');
+    this.load.audio('NTryIt', 'assets/audio/NTryIt-1.mp3');
+    this.load.audio('FirstChunkDraw', 'assets/audio/55.mp3');
+    this.load.audio('FirstChunkDraw1', 'assets/audio/55.mp3');
+    this.load.audio('fantasticMoveOn', 'assets/audio/60.mp3');
+    this.load.audio('wellDone', 'assets/audio/61.mp3');
+    this.load.audio('almostThere', 'assets/audio/62.mp3');
+
+    this.load.audio('ohNo', 'assets/audio/ohno.mp3');
+    this.load.audio('Oops', 'assets/audio/oops.mp3');
+    this.load.audio('SMTryAgain', 'assets/audio/tryagain-sm.mp3');
+    this.load.audio('veryClose', 'assets/audio/veryclose.mp3');
+
+    this.load.audio('tryAgain', 'assets/audio/82.mp3');
+    this.load.audio('greatEffort', 'assets/audio/greatEffortTrG.mp3');
+    this.load.audio('stayOnPath', 'assets/audio/81.mp3');
+    this.load.audio('startAtBeginning', 'assets/audio/80.mp3');
+    this.load.audio('letterComplete', 'assets/audio/70.mp3');
   }
 
   // MARK: Create
   create() {
-    this.letterData = this.cache.json.get('letters').siin;
+    this.letterData = this.cache.json.get('letters').ain;
 
     // Initialize graphics object for drawing
     this.letterGraphics[this.currentChunkIndex] = this.add.graphics();
     this.childDrawingGraphics = this.add.graphics();
 
-    // Draw the letter path
-    // console.log(this.letterData.chunks);
-
     // Setup input and button functionality
     this.setupInputAndButton();
 
-    // this.drawLetter(this.letterData.chunks);
 
-    // Draw the letter path with boundaries
-    this.drawLetterWithBoundaries(this.letterData.paths, this.letterData.dims);
+    (async () => {
+      try {
+        // Step 1: Show the full letter filled with animation
+        await this.showFullLetterFilledWithAnimation();
+        console.log('Initial animation complete');
+
+        // Step 2: Play the introduction sound
+        console.log('Playing introduction sound');
+
+        await this.playAudio(this.AUDIO_NAMES.INTRODUCTION);
+        console.log('Introduction sound played');
+
+        await this.delay(this.DELAY_BETWEEN_ANIMATIONS);
+        console.log('Delay complete');
+
+        // Step 3: Play the encouragement sound and start the old process
+        await this.playAudio(this.AUDIO_NAMES.YOU_CAN_DO_IT);
+        console.log('Hiding full letter');
+
+        this.hideFullLetter();
+
+        console.log('Full letter hidden');
+        await this.drawLetterWithBoundaries(this.letterData.paths, this.letterData.dims);
+      } catch (error) {
+        console.error('Error during the game initialization:', error);
+        // Handle the error appropriately, e.g., show a message to the user
+      }
+    })();
 
     // Set up input for drawing
     this.input.setPollAlways(); // Ensure smooth input tracking
@@ -187,7 +302,7 @@ export class TracingGameScene extends Phaser.Scene {
  */
   private drawFaintLetterPaths(paths: { x: number; y: number }[][][], offsetX: number, offsetY: number): void {
     console.log(paths);
-    
+
     paths.forEach((pathGroup) => {
       pathGroup.forEach((path) => {
         // Draw faint line for the actual letter path
@@ -231,10 +346,10 @@ export class TracingGameScene extends Phaser.Scene {
 
 
   // MARK: Draw letter boundaries
-  private drawLetterWithBoundaries(
+  private async drawLetterWithBoundaries(
     paths: { x: number; y: number }[][][],
     dims: { maxX: number; maxY: number; minX: number; minY: number; wid: number; }
-  ): void {
+  ) {
     // Reset state variables if not reinitializing a completed chunk
     if (!this.completedChunks.has(this.currentChunkIndex)) {
       this.currentChunk = [];
@@ -247,8 +362,6 @@ export class TracingGameScene extends Phaser.Scene {
     this.offsetY = offsets.offsetY;
 
     // Step 2: Clear previous segments
-    console.log(paths);
-    
     // this.segmentVisuals[this.currentChunkIndex].forEach(g => g.destroy());
     this.segmentVisuals[this.currentChunkIndex] = [];
 
@@ -259,81 +372,191 @@ export class TracingGameScene extends Phaser.Scene {
     }
 
     // Step 4: Create the mask for the letter area
-    // this.createLetterMask(paths[0], this.offsetX, this.offsetY);
+    // this.createLetterMask(paths[this.currentLetterIndex], this.offsetX, this.offsetY);
 
     // Step 5: Stop if all chunks are completed
-    if (this.currentChunkIndex >= paths[0].length) {
+    if (this.currentChunkIndex >= paths[this.currentLetterIndex].length) {
       this.onLetterCompleted(); // Handle full completion (custom logic)
       return;
     }
 
-    // Step 6: Get current chunk data
-    const currentChunk = paths[0][this.currentChunkIndex];
-    console.log('Current Chunk:', currentChunk);
-
-    // Step 7: Transform chunk coordinates
-    const transformedChunk = currentChunk.map(point => ({
-      x: point.x * this.scaleUp + this.offsetX,
-      y: point.y * this.scaleUp + this.offsetY
-    }));
+    // Step 6: Get and transform current chunk data
+    const transformedChunk = getTransformedChunk(
+      paths,
+      this.currentLetterIndex,
+      this.currentChunkIndex,
+      this.scaleUp,
+      this.offsetX,
+      this.offsetY
+    );
 
     // Step 8: Initialize segments
-    this.segments[this.currentChunkIndex] = this.dividePathIntoSegments(transformedChunk);
+    // this.segments[this.currentChunkIndex] = this.dividePathIntoSegments(transformedChunk);
     this.currentChunk = transformedChunk;
 
     // Step 9: Animate and handle drawing
-    this.animateAndWaitForChunk(currentChunk, this.scaleUp, this.offsetX, this.offsetY).then(() => {
-      this.isAnimating = false;
-      console.log('Ready for drawing the current chunk');
-    });
+    try {
+      await this.animateFullLetter(this.letterData.paths[this.currentLetterIndex], this.scaleUp, this.offsetX, this.offsetY);
+      // console.log('Initial animation complete');
+      // console.log('Current Chunk Index:', this.currentChunkIndex);
 
-    // console.log('test counter', testCounter++);
+      if (!this.letterGraphics[this.currentChunkIndex]) {
+        this.letterGraphics[this.currentChunkIndex] = this.add.graphics();
+      }
+      this.drawFaintLetterPaths(paths, this.offsetX, this.offsetY);
 
+      await this.delay(this.DELAY_BETWEEN_ANIMATIONS);
+
+      await this.playAudio(this.AUDIO_NAMES.FIRST_CHUNK_DRAW);
+      await this.animateChunk(this.letterData.paths[this.currentLetterIndex][0], this.scaleUp, this.offsetX, this.offsetY);
+
+      await this.delay(this.DELAY_BETWEEN_ANIMATIONS);
+      await this.playAudio(this.AUDIO_NAMES.N_TRY_IT);
+
+      console.log('First chunk animation complete');
+    } catch (error) {
+      console.error('Error during animation:', error);
+    }
   }
 
   private onLetterCompleted(): void {
     console.log('All chunks completed!');
     console.log('Letter drawing completed!');
     // Add logic to display success, transition to another activity, etc.
-
-    alert('All chunks completed!, Letter drawing completed!');
+    // Play the "letterComplete" sound when the letter is fully completed
+    this.playAudio(this.AUDIO_NAMES.LETTER_COMPLETE).catch((error) => {
+      console.error('Error playing audio:', error);
+    });
   }
 
-
-
-  // MARK: drawDottedLineWithHand
-  private drawDottedLineWithHand(
-    path: { x: number; y: number }[],
+  // MARK: animateChunk
+  private async animateChunk(
+    chunk: { x: number; y: number }[],
     scaleUp: number,
-    duration: number,
     offsetX: number,
     offsetY: number
-  ): void {
-    // Ensure graphics context exists
+  ): Promise<void> {
+    const dotRadius = 3; // Radius of each dot
+    const dotSpacing = 10; // Spacing between each dot
+    const dashSpacing = 10; // Spacing between dashes
+    const duration = 2000; // Total duration for the chunk animation
+    const arrowScale = 0.05; // Scale for the arrow image
+
+    // Step 6: Get and transform current chunk data
+    const transformedChunk = getTransformedChunk(
+      this.letterData.paths,
+      this.currentLetterIndex,
+      this.currentChunkIndex,
+      this.scaleUp,
+      this.offsetX,
+      this.offsetY
+    );
+
+
+    // Step 8: Initialize segments
+    this.segments[this.currentChunkIndex] = this.dividePathIntoSegments(transformedChunk);
+
+    // Initialize letterGraphics if it does not exist
     if (!this.letterGraphics[this.currentChunkIndex]) {
       this.letterGraphics[this.currentChunkIndex] = this.add.graphics();
+      this.chunkElements.push(this.letterGraphics[this.currentChunkIndex]);
+
+      // Change the chunk depth if the chunk index is greater than 0
+      if (this.currentChunkIndex > 0) {
+        this.letterGraphics[this.currentChunkIndex].setDepth(this.handDepth + 1);
+        this.handDepth += this.currentChunkIndex * 3 + 1;
+      }
     }
 
-    const dotRadius = 3; // Radius of each dot
-    const dotSpacing = 15; // Spacing between each dot
-    const arrowScale = 0.5; // Adjusted scale for the arrow image
-    const totalDots = Math.floor(duration / 50); // Adjust based on animation speed
+    // Clear any existing interval
+    if (this.animationInterval) {
+      clearInterval(this.animationInterval);
+    }
 
     // Add a hand sprite to guide the drawing
     const hand = this.add
       .sprite(0, 0, 'hand')
-      .setOrigin(0.5, 0.5)
+      .setOrigin(0.3, 0.2)
       .setScale(0.05)
       .setVisible(false)
-      .setDepth(1);
+      .setDepth(this.handDepth);
 
-    const dots: { x: number; y: number; angle: number }[] = [];
+    console.log(this.handDepth);
 
-    // Precompute all dot positions and their angles
-    path.forEach((point, index) => {
-      if (index < path.length - 1) {
-        const start = path[index];
-        const end = path[index + 1];
+
+    // Precompute dots for the entire chunk (single path)
+    const dots = this.precomputeDots(chunk, scaleUp, offsetX, offsetY, dotSpacing);
+
+    // Step 1: Draw the faint line for the chunk
+    this.drawPath(this.letterGraphics[this.currentChunkIndex], [chunk], scaleUp, offsetX, offsetY);
+
+    await this.animateDotsAndArrows(dots, dotRadius, dashSpacing, duration, arrowScale, hand);
+
+    this.drawDebugSegments(this.segments[this.currentChunkIndex]);
+  }
+
+  private async animateFullLetter(
+    letterData: { x: number; y: number }[][],
+    scaleUp: number,
+    offsetX: number,
+    offsetY: number
+  ): Promise<void> {
+    const allDots: { x: number; y: number; angle?: number }[] = [];
+    const dotSpacing = 10; // Spacing between each dot
+
+    // Precompute dots for the entire letter (all chunks)
+    letterData.forEach(chunk => {
+      const chunkDots = this.precomputeDots(chunk, scaleUp, offsetX, offsetY, dotSpacing);
+      allDots.push(...chunkDots);
+    });
+
+    if (!this.letterGraphics[this.currentChunkIndex]) {
+      this.letterGraphics[this.currentChunkIndex] = this.add.graphics();
+      this.chunkElements.push(this.letterGraphics[this.currentChunkIndex]);
+    }
+
+    // Step 1: Draw the faint line for the entire letter
+    // this.playAudio(this.AUDIO_NAMES.FIRST_CHUNK_DRAW);
+    this.drawPath(this.letterGraphics[this.currentChunkIndex], letterData, scaleUp, offsetX, offsetY);
+
+    // Add a hand sprite to guide the drawing
+    const hand = this.add
+      .sprite(0, 0, 'hand')
+      .setOrigin(0.3, 0.2)
+      .setScale(0.05)
+      .setVisible(false)
+      .setDepth(this.handDepth);
+
+    // Step 2: Animate dots and arrows for the entire letter
+    await this.animateDotsAndArrows(allDots, 3, 10, 5000, 0.05, hand, true);
+
+    // sleep for 1 second
+    await new Promise(resolve => setTimeout(resolve, 1000));
+
+    // Clear graphics and remove dots and arrows after animation is complete
+    this.clearGraphics();
+  }
+
+  private clearGraphics(): void {
+    this.letterGraphics.forEach(graphic => graphic.clear());
+    this.chunkElements.forEach(element => element.destroy());
+    this.letterGraphics = [];
+    this.chunkElements = [];
+    this.handDepth = 1;
+  }
+
+  private precomputeDots(
+    chunk: { x: number; y: number }[],
+    scaleUp: number,
+    offsetX: number,
+    offsetY: number,
+    dotSpacing: number
+  ): { x: number; y: number; angle?: number }[] {
+    const dots: { x: number; y: number; angle?: number }[] = [];
+    chunk.forEach((point, index) => {
+      if (index < chunk.length - 1) {
+        const start = chunk[index];
+        const end = chunk[index + 1];
 
         const distance = Phaser.Math.Distance.Between(
           start.x * scaleUp + offsetX,
@@ -341,6 +564,7 @@ export class TracingGameScene extends Phaser.Scene {
           end.x * scaleUp + offsetX,
           end.y * scaleUp + offsetY
         );
+
         const direction = new Phaser.Math.Vector2(
           end.x - start.x,
           end.y - start.y
@@ -364,258 +588,113 @@ export class TracingGameScene extends Phaser.Scene {
         }
       }
     });
-
-    // Debug: Log computed dots
-    // Step 1: Draw the faint line for the entire path
-    this.letterGraphics[this.currentChunkIndex].lineStyle(2, 0x000000, 0.2); // Black line with 20% opacity
-    this.letterGraphics[this.currentChunkIndex].beginPath();
-    path.forEach((point, index) => {
-      if (index === 0) {
-        this.letterGraphics[this.currentChunkIndex].moveTo(
-          point.x * scaleUp + offsetX,
-          point.y * scaleUp + offsetY
-        );
-      } else {
-        this.letterGraphics[this.currentChunkIndex].lineTo(
-          point.x * scaleUp + offsetX,
-          point.y * scaleUp + offsetY
-        );
-      }
-    });
-    this.letterGraphics[this.currentChunkIndex].strokePath();
-
-    // Step 2: Animate dots and hand along the path
-    let dotIndex = 0;
-    const interval = setInterval(() => {
-      if (dotIndex >= dots.length) {
-        clearInterval(interval);
-
-        // Draw the final arrow with an image
-        const arrowEnd = dots[dots.length - 1];
-        this.add
-          .image(arrowEnd.x, arrowEnd.y, 'arrow')
-          .setOrigin(0.5, 0.5)
-          .setScale(arrowScale)
-          .setRotation(arrowEnd.angle + Math.PI / 2); // Adjust rotation for arrow direction
-
-
-        hand.destroy();
-        return;
-      }
-
-      const dot = dots[dotIndex];
-      this.letterGraphics[this.currentChunkIndex].fillStyle(0xff0000, 1); // Red color for dots
-      this.letterGraphics[this.currentChunkIndex].fillCircle(dot.x, dot.y, dotRadius);
-
-      // Place arrow images at regular intervals
-      if (dotIndex % Math.floor(dotSpacing * 2 / dotRadius) === 0) {
-        const arrow = this.add
-          .image(dot.x, dot.y, 'arrow')
-          .setOrigin(0.5, 0.5)
-          .setScale(arrowScale)
-          .setRotation(dot.angle + Math.PI / 2); // Adjust rotation for arrow direction
-
-      }
-
-      // Move the hand
-      hand.setPosition(Math.round(dot.x), Math.round(dot.y));
-      hand.setVisible(true);
-
-      dotIndex++;
-    }, duration / dots.length);
+    return dots;
   }
 
-
-  // MARK: animateChunk
-  private animateChunk(
-    chunk: { x: number; y: number }[],
+  private drawPath(
+    graphics: Phaser.GameObjects.Graphics,
+    chunks: { x: number; y: number }[][],
     scaleUp: number,
     offsetX: number,
-    offsetY: number
-  ): Promise<void> {
-    return new Promise((resolve) => {
-      const dotRadius = 3; // Radius of each dot
-      const dotSpacing = 10; // Spacing between each dot
-      const dashSpacing = 10; // Spacing between dashes
-      const duration = 2000; // Total duration for the chunk animation
-      const arrowScale = 0.05; // Scale for the arrow image
-      const dots: { x: number; y: number; angle?: number }[] = [];
-      let arrow: Phaser.GameObjects.Image;
-      // Initialize letterGraphics if it does not exist
-      // if (!this.letterGraphics[this.currentChunkIndex]) {
-        this.letterGraphics[this.currentChunkIndex] = this.add.graphics();
+    offsetY: number,
+    color: number = this.currentChunkColor
+  ): Phaser.GameObjects.Graphics {
+    graphics.lineStyle(20, color, 1); // Black line with 50% opacity
 
-        this.chunkElements.push(this.letterGraphics[this.currentChunkIndex]);
-        // change the chunk depth if the chunk index is greater than 0
-        if (this.currentChunkIndex > 0) {
-          this.letterGraphics[this.currentChunkIndex].setDepth(this.handDepth);
-
-          // Update the hand depth
-          this.handDepth += this.currentChunkIndex * 3 + 1;
-        }
-      // }
-
-      // Clear any existing interval
-      if (this.animationInterval) {
-        clearInterval(this.animationInterval);
-      }
-
-      // Add a hand sprite to guide the drawing
-      const hand = this.add
-        .sprite(0, 0, 'hand')
-        .setOrigin(0.3, 0.2)
-        .setScale(0.05)
-        .setVisible(false)
-        .setDepth(this.handDepth);
-
-
-      // Precompute dots for the entire chunk (single path)
-      chunk.forEach((point, index) => {
-        if (index < chunk.length - 1) {
-          const start = chunk[index];
-          const end = chunk[index + 1];
-
-          const distance = Phaser.Math.Distance.Between(
-            start.x * scaleUp + offsetX,
-            start.y * scaleUp + offsetY,
-            end.x * scaleUp + offsetX,
-            end.y * scaleUp + offsetY
-          );
-
-          const direction = new Phaser.Math.Vector2(
-            end.x - start.x,
-            end.y - start.y
-          ).normalize();
-
-          // Adjust the angle to ensure the arrow points up
-          const angle = Phaser.Math.Angle.Between(
-            start.x * scaleUp + offsetX,
-            start.y * scaleUp + offsetY,
-            end.x * scaleUp + offsetX,
-            end.y * scaleUp + offsetY
-          );
-
-          let currentDistance = 0;
-          while (currentDistance < distance) {
-            dots.push({
-              x: start.x * scaleUp + direction.x * currentDistance + offsetX,
-              y: start.y * scaleUp + direction.y * currentDistance + offsetY,
-              angle: angle, // Save the angle for the arrow
-            });
-            currentDistance += dotSpacing;
-          }
-
-          
-        }
-        console.log('dots', dots[dots.length - 1]);
-      });
-      // Step 1: Draw a faint line for the path
-      this.letterGraphics[this.currentChunkIndex].lineStyle(20, this.currentChunkColor, 1); // Black line with 50% opacity
-
-      // change the chunk depth if the chunk index is greater than 0
-      if (this.currentChunkIndex > 0) {
-        this.letterGraphics[this.currentChunkIndex].setDepth(this.handDepth);
-      }
-
-      this.letterGraphics[this.currentChunkIndex].beginPath();
+    chunks.forEach(chunk => {
+      graphics.beginPath();
       chunk.forEach((point, index) => {
         if (index === 0) {
-          this.letterGraphics[this.currentChunkIndex].moveTo(
+          graphics.moveTo(
             point.x * scaleUp + offsetX,
             point.y * scaleUp + offsetY
           );
         } else {
-          this.letterGraphics[this.currentChunkIndex].lineTo(
+          graphics.lineTo(
             point.x * scaleUp + offsetX,
             point.y * scaleUp + offsetY
           );
         }
-
-        // Pushing the path to the current chunk
-        this.currentChunk.push({ x: point.x * scaleUp + offsetX, y: point.y * scaleUp + offsetY });
       });
-
-      this.letterGraphics[this.currentChunkIndex].strokePath();
-
-            // Step 2: Animate dots, hand, and arrows along the path
-      let dotIndex = 0;
-      const totalDots = dots.length;
-      const dotDuration = duration / totalDots;
-      
-      // Store the interval ID
-      this.animationInterval = setInterval(() => {
-          if (dotIndex >= dots.length) {
-              clearInterval(this.animationInterval!);
-              hand.destroy(); // Remove the hand after animation
-      
-              // Draw the final arrow at the end of the path
-              const finalDot = dots[dots.length - 1];
-              if (finalDot.angle !== undefined) {
-                  // Adjust the angle to ensure the arrow points in the correct direction
-                  const adjustedAngle = finalDot.angle - Math.PI / 2;
-                  console.log('dot angle', finalDot.angle, adjustedAngle);
-      
-                  // arrow = this.add
-                  //     .image(finalDot.x, finalDot.y, 'arrow')
-                  //     .setOrigin(0.5, 0.5)
-                  //     .setScale(arrowScale)
-                  //     .setTintFill(this.arrowColor)
-                  //     .setTint(this.arrowColor)
-                  //     .setRotation(Math.abs(adjustedAngle)) // Adjust rotation for arrow direction
-                  //     .setDepth(this.handDepth); // Ensure arrow is above the hand
-      
-                  // this.chunkElements.push(arrow);
-              }
-      
-              resolve(); // Signal animation completion
-              return;
-          }
-      
-          const dot = dots[dotIndex];
-      
-          // Draw the starting dot
-          if (dotIndex === 0) {
-              this.letterGraphics[this.currentChunkIndex].fillStyle(this.firstDotColor, 1); // Green color for the starting dot
-              this.letterGraphics[this.currentChunkIndex].fillCircle(dot.x, dot.y, dotRadius);
-          } else if (dotIndex === dots.length - 1) {
-              // Draw the final arrow at the end of the path
-      
-              console.log('dot angle', dot.angle, (dot.angle ?? 0) - Math.PI / 2);
-              
-              if (dot.angle !== undefined) {
-                  // Adjust the angle to ensure the arrow points in the correct direction
-                  const adjustedAngle = dot.angle - Math.PI / 2;
-                  arrow = this.add
-                      .image(dot.x, dot.y, 'arrow')
-                      .setOrigin(0.5, 0.5)
-                      .setScale(arrowScale)
-                      .setTintFill(this.arrowColor)
-                      .setTint(this.arrowColor)
-                      .setRotation(adjustedAngle) // Adjust rotation for arrow direction
-                      .setDepth(this.handDepth); // Ensure arrow is above the hand
-      
-                  this.chunkElements.push(arrow);
-              }
-          } else {
-              // Draw dashes at regular intervals
-              if (dotIndex % Math.floor(dashSpacing / dotSpacing + 1) === 0) {
-                  const nextDot = dots[dotIndex + 2]; // Skip one dot to create space between dashes
-                  if (nextDot && dotIndex < dots.length - 4) { // Check if nextDot exists
-                      this.letterGraphics[this.currentChunkIndex].fillStyle(this.dotsColor, 1); // Red color for dashes
-                      this.letterGraphics[this.currentChunkIndex].fillCircle(dot.x, dot.y, dotRadius);
-                  }
-              }
-          }
-      
-          // Move the hand
-          hand.setPosition(Math.round(dot.x), Math.round(dot.y));
-          hand.setVisible(true);
-      
-          dotIndex++;
-      }, dotDuration);
+      graphics.strokePath();
     });
+
+    return graphics;
   }
 
+    private animateDotsAndArrows(
+      dots: { x: number; y: number; angle?: number }[],
+      dotRadius: number,
+      dashSpacing: number,
+      duration: number,
+      arrowScale: number,
+      hand: Phaser.GameObjects.Sprite,
+      flipArrows: boolean = false
+  ): Promise<void> {
+      return new Promise((resolve) => {
+          let dotIndex = 0;
+          const totalDots = dots.length;
+          const dotDuration = duration / totalDots;
+  
+          // Calculate the position of the arrow at the start of the chunk
+          const startDot = dots[0];
+          const nextDot = dots[1];
+          const arrowOffset = 20; // Adjust this value to place the arrow outside the chunk
+          const arrowPosition = this.calculateArrowPosition(startDot, nextDot, arrowOffset);
+  
+          // Add the arrow at the start of the chunk
+          const arrow = this.add
+              .image(arrowPosition.x, arrowPosition.y, 'arrow')
+              .setOrigin(0.5, 0.5)
+              .setScale(arrowScale)
+              .setRotation(arrowPosition.angle - Math.PI / 2) // Rotate the arrow based on the angle
+              .setDepth(this.handDepth); // Ensure arrow is above the hand
+  
+          // Flip the arrow if needed
+          arrow.setFlipY(true);
+          arrow.setFlipX(true);    
+  
+          this.chunkElements.push(arrow);
+  
+          this.animationInterval = setInterval(() => {
+              if (dotIndex >= dots.length) {
+                  clearInterval(this.animationInterval!);
+                  hand.destroy(); // Remove the hand after animation
+  
+                  resolve(); // Signal animation completion
+                  return;
+              }
+  
+              const dot = dots[dotIndex];
+  
+              if (dotIndex === 0) {
+                  this.letterGraphics[this.currentChunkIndex].fillStyle(this.firstDotColor, 1); // Green color for the starting dot
+                  this.letterGraphics[this.currentChunkIndex].fillCircle(dot.x, dot.y, dotRadius);
+              }  else {
+                  if (dotIndex % Math.floor(dashSpacing / dashSpacing + 1) === 0) {
+                      const nextDot = dots[dotIndex + 2];
+                      if (nextDot && dotIndex < dots.length) {
+                          this.letterGraphics[this.currentChunkIndex].fillStyle(this.dotsColor, 1); // Red color for dashes
+                          this.letterGraphics[this.currentChunkIndex].fillCircle(dot.x, dot.y, dotRadius);
+                      }
+                  }
+              }
+  
+              hand.setPosition(Math.round(dot.x), Math.round(dot.y));
+              hand.setVisible(true);
+  
+              dotIndex++;
+          }, dotDuration);
+      });
+  }
+
+    private calculateArrowPosition(start: { x: number; y: number }, end: { x: number; y: number }, offset: number): { x: number; y: number; angle: number } {
+      const direction = new Phaser.Math.Vector2(end.x - start.x, end.y - start.y).normalize();
+      const angle = Phaser.Math.Angle.Between(start.x, start.y, end.x, end.y);
+      const arrowX = start.x - direction.x * offset;
+      const arrowY = start.y - direction.y * offset;
+      return { x: arrowX, y: arrowY, angle: angle };
+  }
 
   // MARK: waitForChildToDraw
   private waitForChildToDraw(
@@ -637,59 +716,145 @@ export class TracingGameScene extends Phaser.Scene {
   /* ------------------------------ drawind start ----------------------------- */
   private startDrawing(pointer: Phaser.Input.Pointer): void {
     this.isDrawing = true;
-
-    // Clear previous drawing
     this.childDrawingGraphics.clear();
-
-    // Apply the mask to the child's drawing
-    // if (this.letterMask) {
-    //   this.childDrawingGraphics.setMask(this.letterMask);
-    // }
-
     this.childDrawingGraphics.alpha = 0;
 
-    const startPoint = new Phaser.Geom.Point(pointer.x, pointer.y);
-    const isValidStart = this.segments.some(segment =>
-      Phaser.Geom.Rectangle.ContainsPoint(segment[this.currentChunkIndex].bounds, startPoint)
-    );
-
-    if (!isValidStart) {
-      this.resetCurrentDrawing(); // Reset if starting from an invalid position
-      console.log('Invalid start position, resetting current drawing. Total segments:', this.segments[this.currentChunkIndex].length);
-
+    if (this.currentChunkIndex >= this.segments.length) {
+      console.warn('Invalid chunk index:', this.currentChunkIndex);
       return;
     }
 
-    // Allow restarting from the last valid position or beginning
-    if (!this.lastValidPosition) {
-      this.drawnPoints = [];
-      this.currentSegmentIndex = 0;
-    } else {
-
-      // Start from the last valid position
-      this.drawnPoints.push(this.lastValidPosition);
+    if (!this.segments[this.currentChunkIndex]) {
+      console.warn('Chunk does not exist:', this.currentChunkIndex);
+      return;
     }
 
+    const point = new Phaser.Geom.Point(pointer.x, pointer.y);
+
+    // Check if the first segment in the chunk exists
+    const firstSegment = this.segments[this.currentChunkIndex][0];
+    if (!firstSegment) {
+      console.warn('No first segment found in chunk', this.currentChunkIndex);
+      return;
+    }
+
+    // Expand the first segment bounds by tolerance
+    const expandedBounds = Phaser.Geom.Rectangle.Clone(firstSegment.bounds);
+    expandedBounds.x -= this.tolerance;
+    expandedBounds.y -= this.tolerance;
+    expandedBounds.width += this.tolerance * 2;
+    expandedBounds.height += this.tolerance * 2;
+
+    // Check if the user starts within the expanded first segment
+    this.isValidStart = Phaser.Geom.Rectangle.ContainsPoint(expandedBounds, point);
+
+    if (!this.isValidStart) {
+      console.log('Invalid start position, resetting drawing.');
+      const sound = this.getSoundToPlay(this.CASES_AND_SOUNDS.START_WRONG_POSITION);
+      this.playAudio(sound).catch((error) => console.error('Error playing audio:', error));
+      this.resetCurrentDrawing();
+      return;
+    }
+
+    console.log('Valid start detected');
+    this.CASES_AND_SOUNDS.START_WRONG_POSITION.count = 0;
   }
 
-  private continueDrawing(pointer: Phaser.Input.Pointer): void {
-    if (!this.isDrawing) return;
 
+  private showFullLetterFilledWithAnimation(): Promise<void> {
+    return new Promise((resolve) => {
+      // Logic to show the full letter filled using drawPath
+      const graphics = this.add.graphics();
+      const offsets = this.calculateOffsets(this.letterData.dims, this.scaleUp);
+      this.drawPath(graphics, this.letterData.paths[this.currentLetterIndex], this.scaleUp, offsets.offsetX, offsets.offsetY);
+      this.fullLetterGraphics = graphics;
+
+      // Add fade-in or zoom-in animation
+      this.tweens.add({
+        targets: graphics,
+        scale: 1.01, // Zoom-in effect
+        // alpha: { from: 0.5, to: 1 }, // Fade-in effect
+        ease: 'Linear',
+        repeat: 0,
+        yoyo: true,
+        duration: 700, // Duration of the animation in milliseconds
+        onComplete: () => {
+          resolve();
+        }
+      });
+    });
+  }
+
+  private hideFullLetter(): void {
+    // Logic to hide the full letter
+    if (this.fullLetterGraphics) {
+      // this.fullLetterGraphics.setAlpha(0.1);
+      this.fullLetterGraphics.destroy();
+    }
+  }
+
+
+  // MARK: DrawingTimeout
+  private startDrawingTimeout(): void {
+    this.clearDrawingTimeout();
+    this.drawingTimeout = setTimeout(() => {
+      if (!this.isDrawing) {
+        // Play a sound if the mouse hasn't moved for more than 5 seconds
+        this.playAudio('almostThere').catch((error) => {
+          console.error('Error playing audio:', error);
+        });
+      } else {
+        // Show the hand animation if the mouse has moved but no drawing has occurred for more than 4 or 5 seconds
+        this.showPenAndAnimateDots();
+      }
+    }, 5000); // 5 seconds of inactivity
+  }
+
+  private clearDrawingTimeout(): void {
+    if (this.drawingTimeout) {
+      clearTimeout(this.drawingTimeout);
+      this.drawingTimeout = null;
+    }
+  }
+
+  private showPenAndAnimateDots(): void {
+    const currentChunk = this.letterData.paths[this.currentLetterIndex][this.currentChunkIndex];
+    const dots = this.precomputeDots(currentChunk, this.scaleUp, this.offsetX, this.offsetY, 10);
+
+    // Add a hand sprite to guide the drawing
+    const hand = this.add
+      .sprite(0, 0, 'hand')
+      .setOrigin(0.3, 0.2)
+      .setScale(0.05)
+      .setVisible(false)
+      .setDepth(this.handDepth);
+
+    this.animateDotsAndArrows(dots, 3, 10, 2000, 0.05, hand);
+  }
+
+  // MARK: CDrawing
+  private continueDrawing(pointer: Phaser.Input.Pointer): void {
+    // in case in the intial drawing the user was trying to draw the letter
+    if (!this.isDrawing || !this.segments[this.currentChunkIndex]) return;
+
+    if (!this.isValidStart) {
+      this.resetCurrentDrawing();
+      return;
+    }
     const point = new Phaser.Geom.Point(pointer.x, pointer.y);
-    let isOnPath = false;
-    const tolerance = 10; // Allow a margin of error around the segment bounds
+    this.isOnPath = false;
 
     // Iterate through segments to check containment and update
     this.segments[this.currentChunkIndex].forEach((segment, index) => {
       // Expand the segment bounds by the tolerance
       const expandedBounds = Phaser.Geom.Rectangle.Clone(segment.bounds);
-      expandedBounds.x -= tolerance;
-      expandedBounds.y -= tolerance;
-      expandedBounds.width += tolerance * 2;
-      expandedBounds.height += tolerance * 2;
+      expandedBounds.x -= this.tolerance;
+      expandedBounds.y -= this.tolerance;
+      expandedBounds.width += this.tolerance * 2;
+      expandedBounds.height += this.tolerance * 2;
 
       if (Phaser.Geom.Rectangle.ContainsPoint(expandedBounds, point)) {
-        isOnPath = true;
+        this.isOnPath = true;
 
         // Mark as active segment
         if (!segment.completed) {
@@ -706,8 +871,9 @@ export class TracingGameScene extends Phaser.Scene {
     });
 
     // If the user goes off the path, reset the drawing
-    if (!isOnPath) {
+    if (!this.isOnPath) {
       console.log('User went off the path. Resetting progress.');
+      this.playAudio(this.getSoundToPlay(this.CASES_AND_SOUNDS.OUTSIDE_BOUNDARY))
       this.resetCurrentDrawing();
       return;
     }
@@ -716,9 +882,20 @@ export class TracingGameScene extends Phaser.Scene {
     this.drawnPoints.push(point);
   }
 
-  private stopDrawing(paths: { x: number; y: number }[][][]): void {
+
+  // MARK: StopDrawing
+  private async stopDrawing(paths: { x: number; y: number }[][][]) {
     this.isDrawing = false;
     console.log('Stopped Drawing');
+
+    // in case in the intial drawing the user was trying to draw the letter
+    if (!this.segments[this.currentChunkIndex] || !this.isOnPath) return;
+
+
+    if (!this.isValidStart) {
+      this.resetCurrentDrawing();
+      return
+    }
 
     // Calculate the number of completed segments
     const completedSegments = this.segments[this.currentChunkIndex].filter(segment => segment.completed).length;
@@ -733,34 +910,56 @@ export class TracingGameScene extends Phaser.Scene {
       this.chunkCompleted(this.segments[this.currentChunkIndex]);
       ++this.currentChunkIndex;
       this.segments[this.currentChunkIndex] = []
+      this.segmentVisuals[this.currentChunkIndex] = []
       console.log('Chunk completed. Moving to the next chunk.');
+
 
       // clear the chunk elements
       this.chunkElements.forEach(element => element.destroy());
 
-      // Draw the next chunk
-      this.drawLetterWithBoundaries(this.letterData.paths, this.letterData.dims);
+      // Draw the next chunk if it exists
+      // Stop if all chunks are completed
+      if (this.currentChunkIndex < this.letterData.paths[this.currentLetterIndex].length) {
+        try {
+          // Play the "wellDone" sound when a chunk is completed and wait for it to finish
+          const sound = this.currentChunkIndex % 2 ? this.AUDIO_NAMES.WELL_DONE : this.AUDIO_NAMES.FANTASTIC_MOVE_ON;
+          await this.playAudio(sound);
+        } catch (error) {
+          console.error('Error playing audio:', error);
+        }
+        this.animateChunk(this.letterData.paths[this.currentLetterIndex][this.currentChunkIndex], this.scaleUp, this.offsetX, this.offsetY);
+      } else {
+        this.onLetterCompleted(); // Handle full completion (custom logic)
+        return;
+      }
+
+      // 
+      this.CASES_AND_SOUNDS.INCOMPLETE_CHUNK.count = 0;
+
     } else {
       console.log('Chunk not completed. Try again.');
-      this.resetCurrentDrawing(); // Optionally reset the current chunk
+      // Play a sound to encourage the child to try again
+      // CHECK IF THE RATE IS MORE THAN 50% 
+      if (completionRate >= 50) {
+        this.playAudio(this.AUDIO_NAMES.ALMOST_THERE).catch((error) => {
+          console.error('Error playing audio:', error);
+        });
+      } else {
+        this.playAudio(this.getSoundToPlay(this.CASES_AND_SOUNDS.INCOMPLETE_CHUNK)).catch((error) => {
+          console.error('Error playing audio:', error);
+        });
+      }
+      
+      // reset the current chunk
+      this.resetCurrentDrawing(); 
     }
 
-    // log all data
-    // console.log('drawnPoints ');
-    // console.log(this.drawnPoints);
-    // console.log('segments ');
-    // console.log(this.segments[this.currentChunkIndex]);
-    // console.log('completedChunks ');
-    // console.log(this.completedChunks);
-    // console.log('currentChunkIndex ');
-    // console.log(this.currentChunkIndex);
-    // console.log('currentChunk ');
-    // console.log(this.currentChunk);
-
-
+    // Start the drawing timeout
+    // this.startDrawingTimeout();
   }
 
 
+  // MARK: Path Segments
   private dividePathIntoSegments(
     path: { x: number; y: number }[],
     segmentHeight: number = 5,    // Width across the path (thickness)
@@ -813,7 +1012,6 @@ export class TracingGameScene extends Phaser.Scene {
       }
     }
 
-    // this.drawDebugSegments(segments);
     this.segments[this.currentChunkIndex] = segments;
     return segments;
   }
@@ -821,8 +1019,6 @@ export class TracingGameScene extends Phaser.Scene {
   private drawDebugSegments(segments: LetterSegment[]): void {
     segments.forEach((segment) => {
       const graphics = this.add.graphics();
-      // graphics.lineStyle(1, 0xff0000, 1).setDepth(1);
-      // graphics.fillStyle(0x00ff00, 1);
 
       // Get dimensions from bounds
       const rectWidth = segment.bounds.width;
@@ -859,6 +1055,7 @@ export class TracingGameScene extends Phaser.Scene {
       this.segmentVisuals[this.currentChunkIndex].push(graphics);
     });
   }
+
   private updateSegmentColor(segmentIndex: number, color: number): void {
     if (this.segmentVisuals[this.currentChunkIndex][segmentIndex]) {
       const graphics = this.segmentVisuals[this.currentChunkIndex][segmentIndex];
@@ -888,13 +1085,13 @@ export class TracingGameScene extends Phaser.Scene {
 
       // CHange the depth of the graphics according to the chunk index
       graphics.setDepth(this.handDepth + 1);
-      
+
       // Redraw with new color
       graphics.fillStyle(color, 1); // Fill color with some transparency
       graphics.lineStyle(2, color, 1); // Border color
-      
 
-      
+
+
       graphics.beginPath();
       graphics.moveTo(corners[0].x, corners[0].y);
       corners.slice(1).forEach(p => graphics.lineTo(p.x, p.y));
@@ -1064,5 +1261,92 @@ export class TracingGameScene extends Phaser.Scene {
       boundingBox.minY * scaleUp;
 
     return { offsetX, offsetY };
+  }
+
+  private createArrowSVG(angle: number): string {
+    const svg = `
+          <?xml version="1.0" encoding="utf-8"?>
+          <svg width="24" height="24" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+            <path d="M12 5V19M12 5L6 11M12 5L18 11" stroke="#fff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" transform="rotate(${angle} 12 12)"/>
+          </svg>
+      `;
+    return svg;
+  }
+
+  // MARK: Audio
+  private playAudio(key: string): Promise<void> {
+    return new Promise((resolve, reject) => {
+      try {
+        // Check if no audio is currently playing
+        if (!this.sound.getAllPlaying().length) {
+          const sound = this.sound.add(key, {
+            mute: false,
+            volume: 1,
+            rate: 1,
+            detune: 0,
+            seek: 0,
+            loop: false,
+            delay: 0
+          }) as Phaser.Sound.BaseSound;
+
+          console.log('Playing audio:', key);
+
+          sound.play();
+          sound.on(Phaser.Sound.Events.COMPLETE, () => {
+            resolve();
+          });
+          sound.on('error', (error: any) => {
+            reject(error);
+          });
+        } else {
+          console.log('Audio is already playing, skipping:', key);
+          resolve();
+        }
+      } catch (error) {
+        reject(error);
+      }
+    });
+  }
+
+  private playNextSound(): void {
+    if (this.soundQueue.length > 0 && !this.isPlayingSound) {
+      const nextSound = this.soundQueue.shift();
+      if (nextSound) {
+        this.isPlayingSound = true;
+        this.playAudio(nextSound).then(() => {
+          this.isPlayingSound = false;
+          this.playNextSound();
+        }).catch((error) => {
+          console.error('Error playing audio:', error);
+          this.isPlayingSound = false;
+          this.playNextSound();
+        });
+      }
+    }
+  }
+
+  private queueAudio(key: string): void {
+    this.soundQueue.push(key);
+    this.playNextSound();
+  }
+
+  // for common mistakes and encouragements and also avoinding playing the same sound each time a mistake is made
+  private getSoundToPlay(caseData: { sounds: string[], count: number }): string {
+    const soundToPlay = caseData.count === 0 ? caseData.sounds[0] : caseData.sounds[1];
+    caseData.count++;
+    return soundToPlay;
+  }
+
+  // MARK: DELAY
+  private delay(ms: number): Promise<void> {
+    return new Promise(resolve => setTimeout(resolve, ms));
+  }
+
+  private debounce(func: Function, wait: number): Function {
+    let timeout: any;
+    return (...args: any[]) => {
+      clearTimeout(timeout);
+      timeout = setTimeout(() => func.apply(this, args), wait);
+    };
   }
 }
